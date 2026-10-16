@@ -97,7 +97,11 @@ exec bash "$@"
         self.assertIn("/outputs/models/sft-full>", text)
         self.assertIn("/src:/existing/imports\n", text)
         self.assertNotIn("merge_lora", text)
-        self.assertNotIn("torch.distributed.run", text)
+        self.assertIn("arg=<-m>\narg=<torch.distributed.run>", text)
+        self.assertIn("arg=<--standalone>", text)
+        self.assertIn("arg=<--nnodes=1>", text)
+        self.assertIn("arg=<--nproc-per-node>\narg=<8>", text)
+        self.assertIn("nodes: 1; processes: 8;", result.stderr)
 
     def test_explicit_interpreter_with_spaces_overrides_both_environments(self):
         python = self.python("prepared env/bin/python", "explicit")
@@ -129,16 +133,24 @@ exec bash "$@"
         self.python("fake-bin/python", "current")
         text = self.recorded(self.run_script(
             "--learning-rate", "1e-5", "--epochs", "2",
-            PYTHON_BIN=python.as_posix(), SFT_NPROC_PER_NODE="8",
+            PYTHON_BIN=python.as_posix(), SFT_NPROC_PER_NODE="4",
         ))
         self.assertEqual(text.count("runtime=explicit\n"), 1)
         self.assertIn("arg=<-m>\narg=<torch.distributed.run>", text)
         self.assertIn("arg=<--standalone>", text)
         self.assertIn("arg=<--nnodes=1>", text)
-        self.assertIn("arg=<--nproc-per-node>\narg=<8>", text)
+        self.assertIn("arg=<--nproc-per-node>\narg=<4>", text)
         self.assertIn("scripts/train_sft.py>", text)
         self.assertIn("arg=<--learning-rate>\narg=<1e-5>", text)
         self.assertIn("arg=<--epochs>\narg=<2>", text)
+
+    def test_single_device_override_runs_without_distributed_launcher(self):
+        self.python("fake-bin/python", "current")
+        result = self.run_script(SFT_NPROC_PER_NODE="1")
+        text = self.recorded(result)
+        self.assertNotIn("torch.distributed.run", text)
+        self.assertIn("scripts/train_sft.py>", text)
+        self.assertIn("nodes: 1; processes: 1;", result.stderr)
 
     def test_custom_data_output_and_model_paths_preserve_spaces(self):
         self.python("fake-bin/python", "current")
@@ -201,6 +213,7 @@ exec bash "$@"
         self.validation.unlink()
         result = self.run_script("--help", BASE_MODEL="/missing/model")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Default: 8 (single-node torchrun/DDP)", result.stdout)
         if self.record.exists():
             self.assertIn("arg=<--help>", self.record.read_text(encoding="utf-8"))
 

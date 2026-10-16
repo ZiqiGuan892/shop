@@ -326,8 +326,9 @@ bash scripts/serve_model.sh outputs/models/sft-full
 bash scripts/evaluate.sh sft
 ```
 
-单机多卡可显式设置 `SFT_NPROC_PER_NODE=8 bash scripts/sft.sh`。
-这是 DDP，各卡保留完整训练状态；大模型需要分片时可传已验证的
+默认使用单机 8 卡 DDP 数据并行（DP=8、TP=1），可用
+`SFT_NPROC_PER_NODE=1 bash scripts/sft.sh` 改为单卡。默认有效全局 batch 为
+`每卡 1 × 8 卡 × 累积 8 = 64`。各卡保留完整训练状态；大模型需要分片时可传已验证的
 `--deepspeed 配置.json`，详见 [SFT 指南](docs/sft.md)。已有 LoRA 评测分数不代表新全量方案效果。
 完成评估后再次停止模型服务。
 
@@ -427,7 +428,7 @@ tests/                           核心单元、入口和 Wheel 安装检查
 | `SFT_TRAIN_FILE` | `outputs/sft-collection/clean/train.jsonl` |
 | `SFT_VALIDATION_FILE` | `outputs/sft-collection/clean/validation.jsonl` |
 | `SFT_OUTPUT_DIR` | `outputs/models/sft-full` |
-| `SFT_NPROC_PER_NODE` | `1` |
+| `SFT_NPROC_PER_NODE` | `8`（单机 DDP） |
 
 GRPO 的高级 Hydra 参数可以追加在 `--` 后：
 

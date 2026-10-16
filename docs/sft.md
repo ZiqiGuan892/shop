@@ -58,7 +58,8 @@ SFT_OUTPUT_DIR=outputs/models/sft-full \
 | 优化器 | PyTorch AdamW |
 | Gradient checkpointing | 开启，full 使用 `use_reentrant=false` |
 | Attention | SDPA |
-| 进程数 | 1；可显式设置单机多卡 |
+| 并行方式 | 单机 8 卡 DDP，DP=8、TP=1；每卡一个进程 |
+| 有效全局 batch | `每卡 1 × 8 卡 × 梯度累积 8 = 64` |
 | 保存与验证 | 每个 epoch；最多保留 3 个 checkpoint |
 
 一个样本是一条完整购物轨迹。通过模型自身的 chat template 渲染，只对
@@ -73,17 +74,32 @@ Qwen3.5 使用 AutoProcessor 的模板与对应多模态模型类。
 
 ## 单机多卡与显存
 
-默认不自动占用全部设备。单机 8 卡显式启动：
+默认启动单机 8 个训练进程，需要当前进程可见至少 8 张可用设备。
+直接执行即可启用 8 卡 DDP 数据并行：
 
 ```bash
-SFT_NPROC_PER_NODE=8 \
 BASE_MODEL="$(pwd)/../models/Qwen3.5-4B" \
   bash scripts/sft.sh --dtype bf16
 ```
 
-脚本使用同一个 Python 的 `-m torch.distributed.run --standalone --nnodes=1`。
+脚本使用同一个 Python 的
+`-m torch.distributed.run --standalone --nnodes=1 --nproc-per-node 8`。
 Ascend 上先导入 torch_npu、按 `LOCAL_RANK` 绑定 NPU，再检测 BF16；
-分布式通信交给 Transformers/Accelerate。
+分布式通信交给 Transformers/Accelerate。DDP 让各卡处理不同的数据分片，
+同步梯度后更新各自的模型副本。默认没有张量并行，TP=1；
+也没有默认启用 DeepSpeed 或 FSDP。实际加速比取决于序列长度、通信和数据量。
+
+需要更改卡数时显式覆盖，单卡模式不启动 torchrun：
+
+```bash
+SFT_NPROC_PER_NODE=4 bash scripts/sft.sh
+SFT_NPROC_PER_NODE=1 bash scripts/sft.sh
+```
+
+梯度累积仍为 8，因此有效全局 batch 从原先默认单卡的 8 变为 64，
+每个 epoch 的优化器更新步数也随之减少。若需要保持原先的有效全局 batch=8，
+在默认 8 卡启动时传入 `--gradient-accumulation-steps 1`。
+最后不足一个完整 batch 的更新可能包含更少样本。
 
 普通 DDP 会在每卡保留完整模型及优化器状态，增加卡数不等于将显存合并。
 全量微调的显存开销与 LoRA 不同，9B 模型和长序列是否能运行需在服务器验证；
@@ -91,7 +107,7 @@ Ascend 上先导入 torch_npu、按 `LOCAL_RANK` 绑定 NPU，再检测 BF16；
 若服务器已有兼容的 DeepSpeed，可显式传入自己的配置：
 
 ```bash
-SFT_NPROC_PER_NODE=8 bash scripts/sft.sh --deepspeed /path/to/validated-zero-config.json
+bash scripts/sft.sh --deepspeed /path/to/validated-zero-config.json
 ```
 
 脚本不安装 DeepSpeed，也不默认应用分片配置。ZeRO-3 配置必须设置

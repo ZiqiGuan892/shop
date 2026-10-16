@@ -317,7 +317,9 @@ bash scripts/serve_model.sh outputs/models/sft-full
 bash scripts/evaluate.sh sft
 ```
 
-Set `SFT_NPROC_PER_NODE=8` for optional single-node DDP. Each device still holds
+Single-node DDP on 8 devices is the default (DP=8, TP=1). Set
+`SFT_NPROC_PER_NODE=1` for one device. The default effective global batch size is
+`1 per device × 8 devices × 8 accumulation steps = 64`. Each device still holds
 the full training state; use a validated `--deepspeed CONFIG.json` when sharding
 is required. See [SFT](docs/sft.md). Previously reported LoRA results do not
 measure this new full fine-tuning recipe. Stop the model server again before GRPO.
@@ -417,7 +419,7 @@ Most users only need these environment variables:
 | `SFT_TRAIN_FILE` | `outputs/sft-collection/clean/train.jsonl` |
 | `SFT_VALIDATION_FILE` | `outputs/sft-collection/clean/validation.jsonl` |
 | `SFT_OUTPUT_DIR` | `outputs/models/sft-full` |
-| `SFT_NPROC_PER_NODE` | `1` |
+| `SFT_NPROC_PER_NODE` | `8` (single-node DDP) |
 
 Advanced GRPO overrides can be appended after `--`:
 
