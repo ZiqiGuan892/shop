@@ -11,14 +11,14 @@
 <br />
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
-[![LoRA SFT](https://img.shields.io/badge/Post--training-LoRA%20SFT-7B61FF)](docs/sft.md)
+[![Full SFT](https://img.shields.io/badge/Post--training-Full%20SFT-7B61FF)](docs/sft.md)
 [![veRL](https://img.shields.io/badge/veRL-0.8.0-0E8A16)](https://github.com/verl-project/verl)
 [![ShopSimulator](https://img.shields.io/badge/Environment-ShopSimulator%20v2.1-4C78A8)](https://arxiv.org/pdf/2601.18225)
 [![Benchmark](https://img.shields.io/badge/Benchmark-Final--200--Clean-F59E0B)](docs/evaluation-dataset.md)
 
 <br />
 
-教师轨迹与 LoRA SFT → veRL 在线 GRPO → Final-200 Clean Benchmark 的可审计对比
+教师轨迹与全量 SFT → veRL 在线 GRPO → Final-200 Clean Benchmark 的可审计对比
 
 </div>
 
@@ -53,7 +53,7 @@ Agent 不能只生成一句“推荐购买某商品”，而是必须真正与�
 flowchart LR
     A[教师模型采集轨迹] --> B[Reward v3 回放过滤]
     B --> C[Action-only SFT 数据]
-    C --> D[LoRA SFT]
+    C --> D[全量 SFT]
     D --> E[veRL 在线 GRPO]
     F[ShopSimulator v2.1] --> E
     G[Final-200 Clean 测试任务] --> H[统一评估流水线]
@@ -64,7 +64,7 @@ flowchart LR
 
 | 阶段 | 目标 | 入口 | 详细文档 |
 |---|---|---|---|
-| Baseline | 测量原始 Qwen3.5-2B 的工具使用能力 | `bash scripts/baseline.sh` | [评估](docs/evaluation.md) |
+| Baseline | 测量所选基模的工具使用能力 | `bash scripts/baseline.sh` | [评估](docs/evaluation.md) |
 | SFT | 从高质量教师轨迹学习合法、完整的购物行为 | `bash scripts/sft.sh` | [SFT](docs/sft.md) |
 | GRPO | 在真实环境 Rollout 中优化 Reward v3 | `bash scripts/grpo.sh` | [GRPO](docs/grpo.md) |
 | Evaluation | 使用同一批 Final-200 Clean 留出任务公平比较模型 | `bash scripts/evaluate.sh NAME` | [评估](docs/evaluation.md) |
@@ -222,7 +222,7 @@ SFT 带来了主要能力提升，让模型学会合法工具调用、长程搜�
 - NVIDIA GPU 和兼容的 CUDA Driver；
 - [`uv`](https://docs.astral.sh/uv/)；
 - 大约 25 GB 可用磁盘空间，用于依赖、模型权重和运行产物；
-- SFT 配置按照 48 GB 显存设计；
+- 历史 LoRA SFT 配方以 48 GB 显存为设计目标；当前默认 9B 全量 SFT 使用 8 卡 ZeRO-2，容量需实测；
 - GRPO 配置按照单张 96 GB GPU 验证。
 
 主训练环境使用 Python 3.12，ShopSimulator 使用隔离的 Python 3.10 环境。
@@ -314,11 +314,12 @@ EVAL_ROLLOUT_PRINT_EVERY=5 EVAL_PROGRESS_INTERVAL=15 \
 
 ### 4. 全量 SFT 并评估
 
-先按[数据采集文档](docs/data-collection.md)生成
-`outputs/sft-collection/clean/train.jsonl` 和 `validation.jsonl`。
-主入口使用当前 Python 环境，通过 Transformers Trainer 更新完整模型参数；
-无需 LoRA adapter 或合并步骤。基模默认是仓库旁 `models/Qwen3.5-2B`，可用
+主入口默认使用仓库已经清洗好的 `data/sft/train.jsonl`（800 条）和
+`data/sft/validation.jsonl`（200 条），无须重新采样。
+使用当前 Python 环境，通过 Transformers Trainer + DeepSpeed 更新完整模型参数；
+无需 LoRA adapter 或合并步骤。基模默认是仓库旁 `models/Qwen3.5-9B`，可用
 `BASE_MODEL` 指定实际模型目录，`PYTHON_BIN` 可指定已配置的 Python。
+环境需要兼容的 DeepSpeed；veRL 能运行不代表 DeepSpeed 已配置好，启动脚本不安装环境。
 
 ```bash
 bash scripts/sft.sh
@@ -326,10 +327,26 @@ bash scripts/serve_model.sh outputs/models/sft-full
 bash scripts/evaluate.sh sft
 ```
 
-默认使用单机 8 卡 DDP 数据并行（DP=8、TP=1），可用
-`SFT_NPROC_PER_NODE=1 bash scripts/sft.sh` 改为单卡。默认有效全局 batch 为
-`每卡 1 × 8 卡 × 累积 8 = 64`。各卡保留完整训练状态；大模型需要分片时可传已验证的
-`--deepspeed 配置.json`，详见 [SFT 指南](docs/sft.md)。已有 LoRA 评测分数不代表新全量方案效果。
+默认使用单机 8 卡数据并行 + ZeRO-2（DP=8、TP=1），加载
+`configs/sft_zero2.json`，启用 BF16、每卡 batch=1 和 gradient checkpointing。
+有效全局 batch 为 `每卡 1 × 8 卡 × 累积 8 = 64`。ZeRO-2 分片梯度与优化器状态，
+各卡仍保留完整参数；不量化、不开启 offload，不保证 9B 长序列一定能在指定显存内运行。
+`--deepspeed 配置.json` 可覆盖默认分片配置。ZeRO-2 本身不降低数值精度，
+但速度可能变快或变慢，浮点归约等差异也意味着不能保证最终成绩完全相同。
+详见 [SFT 指南](docs/sft.md)。已有 LoRA 评测分数不代表新全量方案效果。
+
+如果要使用[重新采样清洗](docs/data-collection.md)后的数据，显式设置：
+
+```bash
+SFT_TRAIN_FILE=outputs/sft-collection/clean/train.jsonl \
+SFT_VALIDATION_FILE=outputs/sft-collection/clean/validation.jsonl \
+  bash scripts/sft.sh
+```
+
+本节的 9B 默认只适用于 SFT；`serve_model.sh` 未传位置参数时仍选择 2B。
+比较 9B 的训练收益时，baseline 阶段应先用 `bash scripts/serve_model.sh Qwen3.5-9B`
+服务同一基模，再运行 `bash scripts/baseline.sh`。评测请求的 `SERVED_MODEL_NAME`
+须与服务一致，默认均为 `shopping-agent`。
 完成评估后再次停止模型服务。
 
 ### 5. 训练 GRPO
@@ -421,14 +438,14 @@ tests/                           核心单元、入口和 Wheel 安装检查
 
 | 环境变量 | 默认值 |
 |---|---|
-| `BASE_MODEL` | `Qwen/Qwen3.5-2B` |
+| `BASE_MODEL` | SFT：`../models/Qwen3.5-9B` |
 | `SHOPSIM_BASE_URL` | `http://127.0.0.1:5700` |
 | `LLM_BASE_URL` | `http://127.0.0.1:8000/v1` |
 | `SERVED_MODEL_NAME` | `shopping-agent` |
-| `SFT_TRAIN_FILE` | `outputs/sft-collection/clean/train.jsonl` |
-| `SFT_VALIDATION_FILE` | `outputs/sft-collection/clean/validation.jsonl` |
+| `SFT_TRAIN_FILE` | `data/sft/train.jsonl` |
+| `SFT_VALIDATION_FILE` | `data/sft/validation.jsonl` |
 | `SFT_OUTPUT_DIR` | `outputs/models/sft-full` |
-| `SFT_NPROC_PER_NODE` | `8`（单机 DDP） |
+| `SFT_NPROC_PER_NODE` | `8`（单机数据并行 + ZeRO-2，TP=1） |
 
 GRPO 的高级 Hydra 参数可以追加在 `--` 后：
 

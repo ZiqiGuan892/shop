@@ -29,8 +29,13 @@ class SFTScriptTest(unittest.TestCase):
                 self.root / "scripts" / name,
                 (ROOT / "scripts" / name).read_text(encoding="utf-8"),
             )
-        self.train = self.root / "outputs/sft-collection/clean/train.jsonl"
-        self.validation = self.root / "outputs/sft-collection/clean/validation.jsonl"
+        self.deepspeed_config = self.root / "configs/sft_zero2.json"
+        self.write(
+            self.deepspeed_config,
+            (ROOT / "configs/sft_zero2.json").read_text(encoding="utf-8"),
+        )
+        self.train = self.root / "data/sft/train.jsonl"
+        self.validation = self.root / "data/sft/validation.jsonl"
         self.write(self.train, "{}\n")
         self.write(self.validation, "{}\n")
 
@@ -60,7 +65,6 @@ exit "${{FIXTURE_TRAIN_EXIT:-0}}"
             environment.pop(key, None)
         environment.update(
             FIXTURE_BIN=self.bin.as_posix(), FIXTURE_RECORD=self.record.as_posix(),
-            BASE_MODEL="fixture-base-model",
         )
         environment.update(extra_env)
         shell = '''
@@ -81,7 +85,7 @@ exec bash "$@"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return self.record.read_text(encoding="utf-8")
 
-    def test_default_uses_clean_data_full_training_and_current_environment(self):
+    def test_default_uses_repository_data_zero2_full_training_and_current_environment(self):
         self.python("fake-bin/python", "current")
         self.python(".venv/bin/python", "repo")
         result = self.run_script(PYTHONPATH="/existing/imports")
@@ -91,10 +95,18 @@ exec bash "$@"
         self.assertIn("Using SFT Python:", result.stderr)
         self.assertIn("scripts/train_sft.py>", text)
         self.assertIn("arg=<--finetuning-type>\narg=<full>", text)
-        self.assertIn("arg=<--model>\narg=<fixture-base-model>", text)
-        self.assertIn("/outputs/sft-collection/clean/train.jsonl>", text)
-        self.assertIn("/outputs/sft-collection/clean/validation.jsonl>", text)
+        self.assertIn("/../models/Qwen3.5-9B>", text)
+        self.assertIn("/data/sft/train.jsonl>", text)
+        self.assertIn("/data/sft/validation.jsonl>", text)
         self.assertIn("/outputs/models/sft-full>", text)
+        self.assertIn("arg=<--dtype>\narg=<bf16>", text)
+        self.assertIn("arg=<--per-device-train-batch-size>\narg=<1>", text)
+        self.assertIn("arg=<--per-device-eval-batch-size>\narg=<1>", text)
+        self.assertIn("arg=<--gradient-checkpointing>", text)
+        self.assertEqual(text.count("arg=<--deepspeed>\n"), 1)
+        self.assertIn("/configs/sft_zero2.json>", text)
+        self.assertIn("DeepSpeed config:", result.stderr)
+        self.assertIn("/configs/sft_zero2.json", result.stderr)
         self.assertIn("/src:/existing/imports\n", text)
         self.assertNotIn("merge_lora", text)
         self.assertIn("arg=<-m>\narg=<torch.distributed.run>", text)
@@ -102,6 +114,19 @@ exec bash "$@"
         self.assertIn("arg=<--nnodes=1>", text)
         self.assertIn("arg=<--nproc-per-node>\narg=<8>", text)
         self.assertIn("nodes: 1; processes: 8;", result.stderr)
+
+    def test_model_root_override_keeps_default_9b_name(self):
+        self.python("fake-bin/python", "current")
+        text = self.recorded(self.run_script(MODEL_ROOT="/prepared models"))
+        self.assertIn("arg=<--model>\narg=</prepared models/Qwen3.5-9B>", text)
+
+    def test_explicit_base_model_overrides_model_root(self):
+        self.python("fake-bin/python", "current")
+        text = self.recorded(self.run_script(
+            BASE_MODEL="/models/custom Qwen model", MODEL_ROOT="/unused models",
+        ))
+        self.assertIn("arg=<--model>\narg=</models/custom Qwen model>", text)
+        self.assertNotIn("/unused models", text)
 
     def test_explicit_interpreter_with_spaces_overrides_both_environments(self):
         python = self.python("prepared env/bin/python", "explicit")
@@ -167,7 +192,60 @@ exec bash "$@"
         self.assertIn("new data/train.jsonl>", text)
         self.assertIn("new data/validation.jsonl>", text)
         self.assertIn("new model/output>", text)
-        self.assertNotIn("/outputs/sft-collection/clean/", text)
+        self.assertNotIn("/data/sft/", text)
+
+    def test_deepspeed_override_preserves_spaces_and_only_passes_final_config(self):
+        self.python("fake-bin/python", "current")
+        config = self.root / "prepared configs/zero2.json"
+        self.write(config, self.deepspeed_config.read_text(encoding="utf-8"))
+        for arguments in (
+            ("--deepspeed", config.as_posix()),
+            (f"--deepspeed={config.as_posix()}",),
+            ("--deepspeed", "/unused/config.json", f"--deepspeed={config.as_posix()}"),
+        ):
+            with self.subTest(arguments=arguments):
+                result = self.run_script(*arguments)
+                text = self.recorded(result)
+                self.assertEqual(text.count("arg=<--deepspeed>\n"), 1)
+                self.assertIn("/prepared configs/zero2.json>", text)
+                self.assertNotIn("/configs/sft_zero2.json>", text)
+                self.assertNotIn("/unused/config.json>", text)
+                self.assertIn("DeepSpeed config:", result.stderr)
+                self.assertIn("/prepared configs/zero2.json", result.stderr)
+                self.record.unlink()
+
+    def test_missing_or_empty_default_deepspeed_config_fails_before_python(self):
+        self.python("fake-bin/python", "current")
+        for mode in ("missing", "empty"):
+            with self.subTest(mode=mode):
+                if mode == "missing":
+                    self.deepspeed_config.unlink()
+                else:
+                    self.write(self.deepspeed_config, "")
+                result = self.run_script()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("DeepSpeed", result.stderr)
+                self.assertFalse(self.record.exists(), result.stdout + result.stderr)
+
+    def test_missing_or_empty_custom_deepspeed_config_fails_before_python(self):
+        self.python("fake-bin/python", "current")
+        config = self.root / "prepared configs/zero2.json"
+        for mode in ("missing", "empty"):
+            with self.subTest(mode=mode):
+                if mode == "empty":
+                    self.write(config, "")
+                result = self.run_script("--deepspeed", config.as_posix())
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("DeepSpeed", result.stderr)
+                self.assertFalse(self.record.exists(), result.stdout + result.stderr)
+
+    def test_deepspeed_option_requires_a_nonempty_path(self):
+        self.python("fake-bin/python", "current")
+        for arguments in (("--deepspeed",), ("--deepspeed=",), ("--deepspeed", "--epochs", "2")):
+            with self.subTest(arguments=arguments):
+                result = self.run_script(*arguments)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertFalse(self.record.exists(), result.stdout + result.stderr)
 
     def test_missing_or_empty_split_fails_before_launching_training(self):
         self.python("fake-bin/python", "current")
@@ -211,9 +289,10 @@ exec bash "$@"
         self.python("fake-bin/python", "current")
         self.train.unlink()
         self.validation.unlink()
+        self.deepspeed_config.unlink()
         result = self.run_script("--help", BASE_MODEL="/missing/model")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Default: 8 (single-node torchrun/DDP)", result.stdout)
+        self.assertIn("Default: 8 (single-node data parallelism + ZeRO-2)", result.stdout)
         if self.record.exists():
             self.assertIn("arg=<--help>", self.record.read_text(encoding="utf-8"))
 

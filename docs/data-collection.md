@@ -192,8 +192,16 @@ python -m json.tool outputs/sft-collection/clean/reject_stats.json
 wc -l outputs/sft-collection/clean/{train,validation}.jsonl
 ```
 
-后续运行 `bash scripts/sft.sh` 即默认使用上述新训练集/验证集，复用当前 Python
-进行全量微调。若清洗到自定义目录，可设置 `SFT_TRAIN_FILE`、`SFT_VALIDATION_FILE`。
+`scripts/sft.sh` 默认使用仓库 `data/sft/` 下的现成数据。要使用本次新采样并清洗的
+数据，需要显式指定；脚本复用当前 Python，默认进行 8 卡 ZeRO-2 全量微调：
+
+```bash
+SFT_TRAIN_FILE=outputs/sft-collection/clean/train.jsonl \
+SFT_VALIDATION_FILE=outputs/sft-collection/clean/validation.jsonl \
+  bash scripts/sft.sh
+```
+
+如果清洗到自定义目录，将上述两项改为对应文件路径。
 可选课程训练仍使用它自己的数据和 manifest；这两步不会覆盖仓库冻结数据。
 原始响应和采集产物保存在被 Git 忽略的 `outputs/`，不要提交 API key 或原始响应。
 

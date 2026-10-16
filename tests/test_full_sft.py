@@ -137,6 +137,32 @@ class FullSftTests(unittest.TestCase):
             args = self.args("--deepspeed", str(path))
             self.assertEqual(train_sft._training_argument_kwargs(args, "bf16", True, True)["deepspeed"], str(path))
 
+    def test_default_zero2_config_uses_trainer_precision_batch_and_optimizer(self):
+        path = Path(__file__).resolve().parents[1] / "configs/sft_zero2.json"
+        train_sft._validate_deepspeed_config(path)
+        config = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(config["zero_optimization"]["stage"], 2)
+        self.assertTrue(config["zero_optimization"]["ignore_unused_parameters"])
+        for key in ("train_micro_batch_size_per_gpu", "train_batch_size",
+                    "gradient_accumulation_steps", "gradient_clipping"):
+            self.assertEqual(config[key], "auto")
+        for key in ("bf16", "fp16"):
+            self.assertEqual(config[key]["enabled"], "auto")
+        self.assertNotIn("optimizer", config)  # Keep Trainer's PyTorch AdamW.
+        self.assertNotIn("scheduler", config)  # Keep the existing LR schedule.
+        self.assertNotIn("offload_optimizer", config["zero_optimization"])
+        self.assertNotIn("offload_param", config["zero_optimization"])
+        args = self.args("--deepspeed", str(path), "--dtype", "bf16",
+                         "--gradient-checkpointing", "--gradient-accumulation-steps", "4")
+        kwargs = train_sft._training_argument_kwargs(args, "bf16", True, True)
+        self.assertEqual(kwargs["deepspeed"], str(path))
+        self.assertEqual(kwargs["optim"], "adamw_torch")
+        self.assertEqual(kwargs["gradient_accumulation_steps"], 4)
+        self.assertEqual(kwargs["per_device_train_batch_size"], 1)
+        self.assertTrue(kwargs["bf16"])
+        self.assertFalse(kwargs["fp16"])
+        self.assertEqual(kwargs["gradient_checkpointing_kwargs"], {"use_reentrant": False})
+
     def test_trainer_exports_full_model_and_only_rank_zero_writes_processor_and_summary(self):
         for rank in (0, 1):
             with self.subTest(rank=rank), tempfile.TemporaryDirectory() as tmp:
