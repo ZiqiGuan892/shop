@@ -109,11 +109,18 @@ def build_collection_artifacts(
     validation_ratio: float = 0.1,
     seed: int = 42,
     collection_config: dict | None = None,
+    exclusion_audit: list | None = None,
 ) -> dict:
     """Rebuild all derived files from raw rollouts, which remain the source of truth."""
 
     raw_path = Path(raw_path)
     output_dir = Path(output_dir)
+    artifact_names = (
+        "accepted.jsonl", "rejected.jsonl", "sft.jsonl", "train.jsonl",
+        "validation.jsonl", "reject_stats.json", "metadata.json",
+    )
+    if any(raw_path.resolve() == (output_dir / name).resolve() for name in artifact_names):
+        raise ValueError("Output artifacts must not overwrite the raw source file")
     held_out = {int(task_id) for task_id in held_out_task_ids}
     accepted_trajectories = []
     rejected_rows = []
@@ -202,6 +209,7 @@ def build_collection_artifacts(
         "validation_ratio": float(validation_ratio),
         "split_seed": int(seed),
         "collection_config": deepcopy(collection_config or {}),
+        "exclusions": deepcopy(exclusion_audit or []),
         "files": {
             name: {
                 "path": str(path),
@@ -222,6 +230,28 @@ def build_collection_artifacts(
         encoding="utf-8",
     )
     return summary
+
+
+def load_collection_exclusions(extra_paths=()) -> tuple[set[int], list[dict]]:
+    """Always reserve Final-200 and the current GRPO pool; fail closed on missing files."""
+    root = Path(__file__).resolve().parents[3]
+    paths = [
+        root / "data/evaluation/tasks.jsonl",
+        root / "data/grpo/train.jsonl",
+        root / "data/grpo/validation.jsonl",
+        *map(Path, extra_paths),
+    ]
+    excluded = set()
+    audit = []
+    for path in dict.fromkeys(path.resolve() for path in paths):
+        if not path.is_file():
+            raise FileNotFoundError(f"Required exclusion task file is missing: {path}")
+        task_ids = task_ids_from_jsonl(path)
+        if not task_ids:
+            raise ValueError(f"Exclusion task file is empty: {path}")
+        excluded.update(task_ids)
+        audit.append({"path": str(path), "tasks": len(task_ids), "sha256": _sha256(path)})
+    return excluded, audit
 
 
 def task_ids_from_jsonl(path: str | Path | None) -> set[int]:

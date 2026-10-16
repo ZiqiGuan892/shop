@@ -78,15 +78,25 @@ into 800 training and 200 validation rows. SFT, GRPO and Final-200 Clean task ID
 pairwise disjoint. Dataset hashes and the audit are in
 [Data collection](docs/data-collection.md).
 
-The resumable collection entry point is:
+Fresh collection has two separate steps. Start ShopSimulator and export the
+Teacher endpoint's `OPENAI_BASE_URL`, `OPENAI_API_KEY` and `OPENAI_MODEL` first:
 
 ```bash
 python scripts/collect_sft_data.py \
-  --tasks data/grpo/train.jsonl \
-  --output-dir outputs/sft-collection \
-  --target-accepted 1000 \
+  --task-range 0 5000 --limit 3000 \
+  --output-dir outputs/sft-collection/raw \
   --workers 4
+
+python scripts/clean_sft_data.py \
+  --raw outputs/sft-collection/raw/raw.jsonl \
+  --output-dir outputs/sft-collection/clean \
+  --validation-ratio 0.2 --seed 42
 ```
+
+Sampling retains all successes and failures and supports resume. Cleaning is
+offline: it validates, sanitizes, deduplicates and splits the saved trajectories.
+Both steps exclude Final-200 and the current GRPO task pool. See
+[Data collection](docs/data-collection.md) for logs, resume and configuration.
 
 ### How GRPO is trained
 

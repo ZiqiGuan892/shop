@@ -1,102 +1,148 @@
+"""Offline tests for the two-step Teacher sampling/cleaning workflow."""
+
+import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.collect_sft_data import (
-    _validate_args,
-    batch_paths,
-    collect_until_target,
-    parse_args,
-)
+from scripts import clean_sft_data, collect_sft_data
+from shopping_grpo.collection.sft import load_collection_exclusions, read_jsonl, write_jsonl
+from shopping_grpo.evaluation.rollout import CollectionInfrastructureError
+from tests.test_sft_collection import _accepted_trajectory
 
 
-class CollectSftDataCliTests(unittest.TestCase):
-    def test_defaults_match_the_current_teacher_collection_contract(self):
-        with patch.object(sys, "argv", ["collect_sft_data.py", "--tasks", "tasks.jsonl"]):
-            args = parse_args()
+ROOT = Path(__file__).resolve().parents[1]
 
-        self.assertEqual(args.model, "deepseek-v4-flash")
-        self.assertEqual(args.base_url, "http://127.0.0.1:5700")
-        self.assertEqual(args.max_steps, 35)
-        self.assertEqual(args.output_dir, Path("outputs/sft-collection"))
 
-    def test_batch_paths_keep_raw_and_derived_files_together(self):
-        paths = batch_paths(Path("outputs/example"))
-
-        self.assertEqual(paths["raw"], Path("outputs/example/raw.jsonl"))
-        self.assertEqual(paths["accepted"], Path("outputs/example/accepted.jsonl"))
-        self.assertEqual(paths["train"], Path("outputs/example/train.jsonl"))
-        self.assertEqual(
-            paths["validation"], Path("outputs/example/validation.jsonl")
-        )
-
-    def test_build_only_needs_neither_tasks_nor_model_credentials(self):
-        with patch.object(
-            sys,
-            "argv",
-            ["collect_sft_data.py", "--build-only"],
-        ):
-            args = parse_args()
-
-        _validate_args(args)
-        self.assertIsNone(args.tasks)
-
-    def test_collection_stops_at_the_accepted_target(self):
-        rows = [
-            {"trajectory_id": "one", "task_id": 1},
-            {"trajectory_id": "two", "task_id": 2},
+class TeacherDataWorkflowTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="shopping-teacher-test-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.output = self.root / "raw"
+        self.tasks = self.root / "tasks.jsonl"
+        write_jsonl(self.tasks, [{"task_id": x} for x in (1, 1, 2, 3, 4)])
+        self.args = [
+            "--tasks", str(self.tasks), "--output-dir", str(self.output),
+            "--llm-base-url", "http://teacher.test/v1", "--api-key", "test-secret",
+            "--model", "teacher-test", "--attempts-per-task", "2", "--workers", "2",
         ]
-        with tempfile.TemporaryDirectory() as tmpdir, patch(
-            "scripts.collect_sft_data.collect_for_task", side_effect=rows
-        ) as collect, patch(
-            "scripts.collect_sft_data.acceptance_reasons", return_value=(True, [])
-        ):
-            written, accepted = collect_until_target(
-                tasks=[{"task_id": 1}, {"task_id": 2}, {"task_id": 3}],
-                target_accepted=2,
-                client=object(),
-                output_path=Path(tmpdir) / "raw.jsonl",
-                base_url="http://shop.test",
-                max_steps=35,
-                attempts_per_task=1,
-                workers=1,
-            )
+        self.addCleanup(patch.stopall)
+        patch("scripts.collect_sft_data.load_collection_exclusions", return_value=({4}, [])).start()
+        patch("scripts.clean_sft_data.load_collection_exclusions", return_value=({4}, [])).start()
+        self.client = patch("scripts.collect_sft_data._make_client", return_value=object()).start()
+        self.stdout, self.stderr = io.StringIO(), io.StringIO()
+        self.enterContext(redirect_stdout(self.stdout))
+        self.enterContext(redirect_stderr(self.stderr))
 
-        self.assertEqual([row["trajectory_id"] for row in written], ["one", "two"])
-        self.assertEqual(accepted, 2)
-        self.assertEqual(collect.call_count, 2)
+    @staticmethod
+    def rollout(task, *, attempt_index, **kwargs):
+        row = _accepted_trajectory(task["task_id"])
+        row["attempt_index"] = attempt_index
+        row["trajectory_id"] += f"-{attempt_index}"
+        if task["task_id"] == 2:
+            row["terminal_result"]["reward_detail"]["reward_valid"] = False
+        return row
 
-    def test_accepted_target_ignores_held_out_rows_already_in_raw(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            raw = Path(tmpdir) / "raw.jsonl"
-            raw.write_text(json.dumps({"task_id": 1}) + "\n", encoding="utf-8")
-            with patch(
-                "scripts.collect_sft_data.collect_for_task",
-                return_value={"trajectory_id": "two", "task_id": 2},
-            ) as collect, patch(
-                "scripts.collect_sft_data.acceptance_reasons",
-                return_value=(True, []),
-            ):
-                written, accepted = collect_until_target(
-                    tasks=[{"task_id": 2}],
-                    target_accepted=1,
-                    client=object(),
-                    output_path=raw,
-                    base_url="http://shop.test",
-                    max_steps=35,
-                    attempts_per_task=1,
-                    workers=1,
-                    excluded_task_ids={1},
-                )
+    def test_sampling_keeps_all_attempts_and_cleaning_is_offline_and_reproducible(self):
+        with patch("scripts.collect_sft_data.collect_for_task", side_effect=self.rollout) as rollout:
+            self.assertEqual(collect_sft_data.main(self.args), 0)
+            self.assertEqual(rollout.call_count, 6)
+        self.assertEqual(
+            {p.name for p in self.output.iterdir()},
+            {"raw.jsonl", "tasks.jsonl", "collection_config.json"},
+        )
+        raw = self.output / "raw.jsonl"
+        before = raw.read_bytes()
+        self.assertEqual(len(list(read_jsonl(raw))), 6)
+        self.assertIn(b"Teacher private reasoning", before)
+        self.assertIn(b"Reward: 1.0", before)
+        config = (self.output / "collection_config.json").read_text(encoding="utf-8")
+        self.assertNotIn("test-secret", config)
 
-        self.assertEqual([row["task_id"] for row in written], [2])
-        self.assertEqual(accepted, 1)
-        self.assertEqual(collect.call_count, 1)
+        clean = self.root / "clean"
+        clean_args = ["--raw", str(raw), "--output-dir", str(clean), "--validation-ratio", "0.5"]
+        self.client.reset_mock()
+        with patch("urllib.request.urlopen", side_effect=AssertionError("Network is forbidden")):
+            self.assertEqual(clean_sft_data.main(clean_args), 0)
+            first_outputs = {p.name: p.read_bytes() for p in clean.iterdir()}
+            self.assertEqual(clean_sft_data.main(clean_args), 0)
+        self.client.assert_not_called()
+        self.assertEqual(first_outputs, {p.name: p.read_bytes() for p in clean.iterdir()})
+        self.assertEqual(raw.read_bytes(), before)
+        stats = json.loads((clean / "reject_stats.json").read_text(encoding="utf-8"))
+        self.assertEqual(stats["accepted"], 2)
+        self.assertEqual(stats["rejected"], 2)
+        self.assertEqual(stats["duplicate_tasks_excluded"], 2)
+        train = {r["task_id"] for r in read_jsonl(clean / "train.jsonl")}
+        validation = {r["task_id"] for r in read_jsonl(clean / "validation.jsonl")}
+        self.assertEqual(train | validation, {1, 3})
+        self.assertFalse(train & validation)
+        payload = (clean / "sft.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("Teacher private reasoning", payload)
+        self.assertNotIn("Reward: 1.0", payload)
 
-    def test_parallel_collection_uses_an_independent_client_per_trajectory(self):
+    def test_resume_makes_no_repeat_requests_even_for_failed_quality_attempts(self):
+        with patch("scripts.collect_sft_data.collect_for_task", side_effect=self.rollout):
+            self.assertEqual(collect_sft_data.main(self.args), 0)
+        raw = self.output / "raw.jsonl"
+        before = raw.read_bytes()
+        with patch("scripts.collect_sft_data.collect_for_task") as rollout:
+            self.assertEqual(collect_sft_data.main(self.args), 0)
+        rollout.assert_not_called()
+        self.assertEqual(raw.read_bytes(), before)
+
+    def test_changed_teacher_cannot_silently_mix_into_raw(self):
+        with patch("scripts.collect_sft_data.collect_for_task", side_effect=self.rollout):
+            self.assertEqual(collect_sft_data.main(self.args), 0)
+        with patch("scripts.collect_sft_data.collect_for_task") as rollout:
+            self.assertEqual(collect_sft_data.main(self.args + ["--model", "another-model"]), 2)
+        rollout.assert_not_called()
+        self.assertIn("configuration changed", self.stderr.getvalue())
+
+    def test_task_sources_only_contribute_ids_and_limit_applies_after_exclusion(self):
+        write_jsonl(self.tasks, [
+            {"task_id": 4}, {"task_id": 1, "prompt": [{"role": "user", "content": "old"}]},
+            {"task_id": 1}, {"task_id": 2},
+        ])
+        args = collect_sft_data.parse_args(self.args + ["--limit", "2"])
+        self.assertEqual(collect_sft_data.select_tasks(args, {4}), [{"task_id": 1}, {"task_id": 2}])
+        args = collect_sft_data.parse_args(["--task-range", "0", "5", "--limit", "2"])
+        self.assertEqual(collect_sft_data.select_tasks(args, {0, 1}), [{"task_id": 2}, {"task_id": 3}])
+
+    def test_cleaner_rechecks_reserved_tasks_even_if_present_in_raw(self):
+        raw = self.root / "raw.jsonl"
+        write_jsonl(raw, [_accepted_trajectory(1), _accepted_trajectory(4)])
+        clean = self.root / "clean"
+        self.assertEqual(clean_sft_data.main(["--raw", str(raw), "--output-dir", str(clean)]), 0)
+        self.assertEqual([r["task_id"] for r in read_jsonl(clean / "sft.jsonl")], [1])
+        stats = json.loads((clean / "reject_stats.json").read_text(encoding="utf-8"))
+        self.assertEqual(stats["held_out_excluded"], 1)
+
+    def test_cleaner_will_not_overwrite_raw_or_accept_invalid_reward(self):
+        raw = self.root / "sft.jsonl"
+        row = _accepted_trajectory(1)
+        row["terminal_result"]["reward_detail"]["reward_valid"] = False
+        write_jsonl(raw, [row])
+        before = raw.read_bytes()
+        self.assertEqual(clean_sft_data.main(["--raw", str(raw), "--output-dir", str(self.root)]), 2)
+        self.assertEqual(raw.read_bytes(), before)
+        self.assertEqual(clean_sft_data.main([
+            "--raw", str(raw), "--output-dir", str(self.root / "clean"),
+        ]), 2)
+        self.assertEqual(list(read_jsonl(self.root / "clean/train.jsonl")), [])
+
+    def test_infrastructure_failure_stops_dispatch_and_saves_inflight_results(self):
+        raw = self.root / "raw.jsonl"
+        raw.touch()
+        gate = threading.Barrier(2)
         clients = []
 
         def client_factory():
@@ -104,32 +150,73 @@ class CollectSftDataCliTests(unittest.TestCase):
             clients.append(client)
             return client
 
-        def collect(task, *, client, **kwargs):
-            return {
-                "trajectory_id": f"trajectory-{task['task_id']}",
-                "task_id": task["task_id"],
-                "client_id": id(client),
-            }
+        def rollout(task, **kwargs):
+            gate.wait(timeout=5)
+            row = self.rollout(task, **kwargs)
+            row["error"] = {"type": "HTTPError", "message": "401"}
+            return row
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch(
-            "scripts.collect_sft_data.collect_for_task", side_effect=collect
-        ), patch(
-            "scripts.collect_sft_data.acceptance_reasons", return_value=(True, [])
-        ):
-            written, _ = collect_until_target(
-                tasks=[{"task_id": 1}, {"task_id": 2}],
-                target_accepted=2,
-                client=None,
-                client_factory=client_factory,
-                output_path=Path(tmpdir) / "raw.jsonl",
-                base_url="http://shop.test",
-                max_steps=35,
-                attempts_per_task=1,
-                workers=2,
+        with patch("scripts.collect_sft_data.collect_for_task", side_effect=rollout) as collect:
+            with self.assertRaises(CollectionInfrastructureError):
+                collect_sft_data.collect_raw_tasks(
+                    tasks=[{"task_id": x} for x in (1, 2, 3)], client_factory=client_factory,
+                    output_path=raw, base_url="http://shop.test", workers=2,
+                )
+        self.assertEqual(collect.call_count, 2)
+        self.assertEqual(len({id(c) for c in clients}), 2)
+        self.assertEqual(len(list(read_jsonl(raw))), 2)
+
+    def test_stop_drains_active_tasks_without_dispatching_next(self):
+        raw = self.root / "raw.jsonl"
+        raw.touch()
+        stop = threading.Event()
+
+        def rollout(task, **kwargs):
+            stop.set()
+            return self.rollout(task, **kwargs)
+
+        with patch("scripts.collect_sft_data.collect_for_task", side_effect=rollout) as collect:
+            with self.assertRaises(KeyboardInterrupt):
+                collect_sft_data.collect_raw_tasks(
+                    tasks=[{"task_id": 1}, {"task_id": 2}], client_factory=object,
+                    output_path=raw, base_url="http://shop.test", stop_requested=stop,
+                )
+        self.assertEqual(collect.call_count, 1)
+        self.assertEqual(len(list(read_jsonl(raw))), 1)
+
+    def test_corrupt_raw_is_not_silently_skipped_on_resume(self):
+        args = collect_sft_data.parse_args(self.args)
+        raw = collect_sft_data.prepare_output(args, [{"task_id": 1}], [])
+        raw.write_text('{"task_id":', encoding="utf-8")
+        before = raw.read_bytes()
+        with self.assertRaises(ValueError):
+            collect_sft_data.prepare_output(args, [{"task_id": 1}], [])
+        self.assertEqual(raw.read_bytes(), before)
+
+
+class TeacherDataEntrypointTests(unittest.TestCase):
+    def test_both_help_commands_work_without_installed_project_or_api_key(self):
+        env = {k: v for k, v in os.environ.items() if k not in {
+            "PYTHONPATH", "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL",
+        }}
+        for name in ("collect_sft_data.py", "clean_sft_data.py"):
+            result = subprocess.run(
+                [sys.executable, "-B", str(ROOT / "scripts" / name), "--help"],
+                cwd=ROOT.parent, env=env, capture_output=True, text=True, timeout=15,
             )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
-        self.assertEqual(len(clients), 2)
-        self.assertEqual(len({row["client_id"] for row in written}), 2)
+    def test_required_evaluation_and_grpo_exclusions_cannot_be_disabled(self):
+        excluded, audit = load_collection_exclusions()
+        for relative in ("data/evaluation/tasks.jsonl", "data/grpo/train.jsonl", "data/grpo/validation.jsonl"):
+            self.assertTrue({row["task_id"] for row in read_jsonl(ROOT / relative)} <= excluded)
+        self.assertEqual(len(audit), 3)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FileNotFoundError):
+                load_collection_exclusions([Path(tmp) / "missing.jsonl"])
+        with patch("pathlib.Path.is_file", return_value=False):
+            with self.assertRaises(FileNotFoundError):
+                load_collection_exclusions()
 
 
 if __name__ == "__main__":

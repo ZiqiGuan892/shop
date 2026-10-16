@@ -10,6 +10,7 @@ Only the datasets used by the tutorial are kept here.
 
 Adjacent `metadata.json` files record SHA256 checksums and collection
 provenance. All SFT, GRPO and evaluation splits are task-disjoint. Generated
-trajectories belong under `outputs/`, never under `data/`. Use
-`scripts/collect_sft_data.py` to create a new audited SFT dataset before
+trajectories belong under `outputs/`, never under `data/`. First use
+`scripts/collect_sft_data.py` to save raw Teacher trajectories, then run
+`scripts/clean_sft_data.py` offline to create an audited SFT dataset before
 promoting its train/validation files into this directory.

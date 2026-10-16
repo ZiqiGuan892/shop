@@ -80,17 +80,25 @@ Environment v2.1 中采集：
 - 最终划分为 800 条训练数据和 200 条验证数据，并与 GRPO、Final-200 Clean
   保持 task_id 零重叠。
 
-仓库已提供可断点续跑的采集入口：
+重新采集使用两个独立脚本。先启动 ShopSimulator，并导出教师接口的
+`OPENAI_BASE_URL`、`OPENAI_API_KEY` 和 `OPENAI_MODEL`，再执行：
 
 ```bash
 python scripts/collect_sft_data.py \
-  --tasks data/grpo/train.jsonl \
-  --output-dir outputs/sft-collection \
-  --target-accepted 1000 \
+  --task-range 0 5000 --limit 3000 \
+  --output-dir outputs/sft-collection/raw \
   --workers 4
+
+python scripts/clean_sft_data.py \
+  --raw outputs/sft-collection/raw/raw.jsonl \
+  --output-dir outputs/sft-collection/clean \
+  --validation-ratio 0.2 --seed 42
 ```
 
-SFT 只在 Assistant 动作 token 上计算 Loss，用户指令和环境 Observation 会被
+第一步保留全部成功/失败轨迹，支持断点续跑；第二步完全离线，验收、清洗、去重并划分。
+两步均排除评测集及当前 GRPO 任务池，详细参数和日志命令见[数据采集文档](docs/data-collection.md)。
+
+SFT 只在 Assistant 回合（含工具调用和保留的文字）上计算 Loss，用户指令和环境 Observation 会被
 Mask。这样模型学习的是可执行的工具策略，而不是背诵环境返回内容。数据哈希、接受率
 和采集审计见[数据采集文档](docs/data-collection.md)。
 
