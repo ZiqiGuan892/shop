@@ -11,7 +11,9 @@ Usage: bash scripts/setup.sh [--shopsim-only]
 
 Without arguments, install the full SFT/GRPO stack and ShopSimulator, then apply
 the repository's veRL patch. Use --shopsim-only when veRL is already installed.
-Requires uv. SHOPSIM_PYTHON defaults to 3.10 (a Python executable path also works).
+If uv is missing, install it with curl or wget into UV_INSTALL_DIR (default:
+$HOME/.local/bin). Existing uv installations are reused; shell profiles are not
+modified. SHOPSIM_PYTHON defaults to 3.10 (a Python executable path also works).
 HELP
 }
 
@@ -42,9 +44,36 @@ if [[ ! -f "${COMPRESSED_PRODUCTS}" ]]; then
   exit 1
 fi
 if ! command -v uv >/dev/null 2>&1; then
-  echo "uv is required to create the isolated ShopSimulator environment" >&2
+  uv_install_dir="${UV_INSTALL_DIR:-${HOME}/.local/bin}"
+  export PATH="${uv_install_dir}:${PATH}"
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "uv was not found; installing the standalone tool into ${uv_install_dir}."
+    uv_installer="$(mktemp)"
+    trap 'rm -f "${uv_installer}"' EXIT
+    # Download completely before executing; a failed download stops setup.
+    if command -v curl >/dev/null 2>&1; then
+      curl -fLsS --retry 3 --connect-timeout 20 \
+        https://astral.sh/uv/install.sh -o "${uv_installer}"
+    elif command -v wget >/dev/null 2>&1; then
+      wget --timeout=20 --tries=3 -q https://astral.sh/uv/install.sh -O "${uv_installer}"
+    else
+      echo "Installing uv requires curl or wget. Install either tool, or put uv on PATH." >&2
+      exit 1
+    fi
+    # The standalone installer does not install into the active Python environment.
+    if ! UV_INSTALL_DIR="${uv_install_dir}" UV_NO_MODIFY_PATH=1 sh "${uv_installer}"; then
+      echo "uv installation failed; check the installer output and network access." >&2
+      exit 1
+    fi
+    rm -f "${uv_installer}"
+    trap - EXIT
+  fi
+fi
+if ! command -v uv >/dev/null 2>&1; then
+  echo "uv is still unavailable after installation; check UV_INSTALL_DIR and permissions." >&2
   exit 1
 fi
+uv --version
 
 cd "${ROOT}"
 if [[ "${SHOPSIM_ONLY}" == false ]]; then

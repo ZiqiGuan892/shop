@@ -242,7 +242,9 @@ bash scripts/setup.sh --shopsim-only
 
 这个模式只安装独立的 Python 3.10 环境中的 ShopSimulator 依赖，并准备商品数据和
 搜索索引；不会执行主环境的 `uv sync`，也不会安装训练依赖或修改已有 veRL。
-仍需安装 `uv`；可用 `SHOPSIM_PYTHON=/path/to/python3.10` 指定现有解释器。
+脚本会复用已有的 `uv`；找不到时通过 `curl` 或 `wget` 自动安装到
+`~/.local/bin`（可用 `UV_INSTALL_DIR` 修改），无需手动设置 PATH，也不会修改 shell
+配置文件。可用 `SHOPSIM_PYTHON=/path/to/python3.10` 指定现有解释器。
 ShopSimulator 服务使用 CPU，无需加载模型或占用 NPU。
 
 ### 2. 启动 ShopSimulator

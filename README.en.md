@@ -231,8 +231,10 @@ bash scripts/setup.sh --shopsim-only
 
 This mode prepares ShopSimulator in its own Python 3.10 environment, product
 data and search index. It skips the main environment sync and veRL patch.
-It still requires `uv`; set `SHOPSIM_PYTHON=/path/to/python3.10` to select an
-existing interpreter.
+Existing `uv` installations are reused. If missing, the script installs the
+standalone tool using `curl` or `wget` into `~/.local/bin` (override with
+`UV_INSTALL_DIR`) and sets PATH for the current run without changing shell
+profiles. Set `SHOPSIM_PYTHON=/path/to/python3.10` to select an existing interpreter.
 
 ### 2. Start ShopSimulator
 

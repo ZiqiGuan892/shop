@@ -18,6 +18,9 @@ install the pinned CPU service dependencies, verify/extract the embedded product
 data and build the SQLite FTS5 index. It does not install training dependencies
 or patch an existing veRL checkout. Set `SHOPSIM_PYTHON` to use an existing Python
 executable. Omit `--shopsim-only` only when installing the full training stack.
+If `uv` is missing, setup downloads the official standalone installer with
+`curl` or `wget`, installs into `~/.local/bin` (or `UV_INSTALL_DIR`), and updates
+PATH for this run without modifying shell profiles or the active Python environment.
 
 The service runs in the foreground on port 5700 by default. Set `SHOPSIM_PORT`
 or `SHOPSIM_ENV_SLOTS` to change the port or concurrent environment slots; slots

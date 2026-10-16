@@ -73,6 +73,7 @@ printf 'uv' >> "$FIXTURE_RECORD"
 printf ' <%s>' "$@" >> "$FIXTURE_RECORD"
 printf '\\n' >> "$FIXTURE_RECORD"
 case "$1" in
+  --version) echo 'uv fixture'; exit 0 ;;
   sync) destination="$PWD/.venv" ;;
   venv) destination="${@: -1}" ;;
   pip) exit 0 ;;
@@ -93,15 +94,34 @@ chmod +x "$destination/bin/python"
         for name in ("SHOP_SEARCH_INDEX", "SHOP_ENV_CONFIG", "SHOPSIM_LOG_DIR"):
             environment.pop(name, None)
         environment.update(
+            FIXTURE_ROOT=self.root.as_posix(),
             FIXTURE_RECORD=self.record.as_posix(),
             FIXTURE_PYTHON=(self.bin / "fake-python").as_posix(),
             FIXTURE_BIN=self.bin.as_posix(),
+            FIXTURE_UV_PAYLOAD=(self.root / "uv-payload").as_posix(),
+            FIXTURE_ISOLATE_TOOLS="0",
             VIRTUAL_ENV=self.training.as_posix(),
             SHOPSIM_PORT="5700", SHOPSIM_ENV_SLOTS="8", SHOP_MAX_STEPS="35",
         )
         environment.update(extra_env)
+        shell = '''
+export UV_INSTALL_DIR="$(cd "$FIXTURE_ROOT" && pwd)/uv-bin"
+if [[ "$FIXTURE_ISOLATE_TOOLS" == 1 ]]; then
+  # Give bootstrap tests only known shell utilities and fake downloaders.
+  # A real host uv/curl/wget must never be used by a missing-uv test.
+  for tool in bash sh dirname mkdir cp chmod touch cat gzip sha256sum awk mv rm mktemp tee; do
+    executable="$(command -v "$tool")" || exit 91
+    printf '#!/bin/sh\\nexec "%s" "$@"\\n' "$executable" > "$FIXTURE_BIN/$tool"
+    chmod +x "$FIXTURE_BIN/$tool"
+  done
+  export PATH="$(cd "$FIXTURE_BIN" && pwd)"
+else
+  export PATH="$(cd "$FIXTURE_BIN" && pwd):$PATH"
+fi
+exec bash "$@"
+'''
         return subprocess.run(
-            [BASH, "-c", 'export PATH="$(cd "$FIXTURE_BIN" && pwd):$PATH"; exec bash "$@"',
+            [BASH, "-c", shell,
              "fixture", (self.root / relative).as_posix(), *arguments],
             cwd=self.root, env=environment, capture_output=True, text=True, timeout=30,
         )
@@ -110,6 +130,72 @@ chmod +x "$destination/bin/python"
         result = self.run_script("scripts/setup.sh", "--shopsim-only")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return self.record.read_text(encoding="utf-8")
+
+    def prepare_bootstrap(self, downloader="curl"):
+        (self.bin / "uv").rename(self.root / "uv-payload")
+        self.write(self.bin / downloader, """#!/usr/bin/env bash
+set -euo pipefail
+printf 'download %s\\n' "$0" >> "$FIXTURE_RECORD"
+destination="${@: -1}"
+if [[ "${FIXTURE_DOWNLOAD_FAIL:-0}" == 1 ]]; then
+  echo 'echo PARTIAL_INSTALLER_EXECUTED >> "$FIXTURE_RECORD"' > "$destination"
+  exit 22
+fi
+cat > "$destination" <<'INSTALLER'
+#!/bin/sh
+set -eu
+echo "installer no-modify-path=$UV_NO_MODIFY_PATH" >> "$FIXTURE_RECORD"
+if [ "${FIXTURE_INSTALL_FAIL:-0}" = 1 ]; then exit 9; fi
+mkdir -p "$UV_INSTALL_DIR"
+cp "$FIXTURE_UV_PAYLOAD" "$UV_INSTALL_DIR/uv"
+chmod +x "$UV_INSTALL_DIR/uv"
+INSTALLER
+""")
+
+    def test_missing_uv_is_installed_once_and_available_to_setup(self):
+        self.prepare_bootstrap()
+        for _ in range(2):
+            result = self.run_script(
+                "scripts/setup.sh", "--shopsim-only", FIXTURE_ISOLATE_TOOLS="1",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.record.read_text()
+        self.assertEqual(calls.count("download "), 1)
+        self.assertEqual(calls.count("installer no-modify-path=1"), 1)
+        self.assertIn("<pip> <install>", calls)
+        self.assertNotIn("<sync>", calls)
+        self.assertTrue((self.root / "uv-bin/uv").is_file())
+        self.assertFalse((self.root / ".venv").exists())
+
+    def test_missing_uv_can_use_wget_without_curl(self):
+        self.prepare_bootstrap("wget")
+        result = self.run_script(
+            "scripts/setup.sh", "--shopsim-only", FIXTURE_ISOLATE_TOOLS="1",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("fake-bin/wget", self.record.read_text())
+
+    def test_failed_uv_download_does_not_execute_partial_installer(self):
+        self.prepare_bootstrap()
+        result = self.run_script(
+            "scripts/setup.sh", "--shopsim-only",
+            FIXTURE_ISOLATE_TOOLS="1", FIXTURE_DOWNLOAD_FAIL="1",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        calls = self.record.read_text()
+        self.assertNotIn("PARTIAL_INSTALLER_EXECUTED", calls)
+        self.assertNotIn("uv <", calls)
+        self.assertFalse((self.root / "environments/ShopSimulator/.venv-shopsim").exists())
+
+    def test_failed_uv_installation_stops_setup(self):
+        self.prepare_bootstrap()
+        result = self.run_script(
+            "scripts/setup.sh", "--shopsim-only",
+            FIXTURE_ISOLATE_TOOLS="1", FIXTURE_INSTALL_FAIL="1",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("uv installation failed", result.stderr)
+        self.assertNotIn("uv <", self.record.read_text())
 
     def test_standalone_setup_keeps_training_environment_and_prepares_products(self):
         calls = self.install_simulator()
