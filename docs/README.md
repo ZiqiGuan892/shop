@@ -1,5 +1,12 @@
 # Documentation
 
+[项目研究与评测说明](project-evaluation.md) provides a detailed Chinese review of
+the use case, training implementation, reported results, and reproducibility limits.
+
+[Qwen3.5-9B 基线评测复现指南](reproduce-baseline-qwen3.5-9b.md) covers the first
+reproduction step, including isolated dependencies, an Ascend serving reference,
+development checks, and the Final-200 Clean baseline run.
+
 Follow the guides in workflow order:
 
 1. [Data collection](data-collection.md) explains how the checked-in SFT data

@@ -233,6 +233,18 @@ bash scripts/setup.sh
 该脚本会安装固定版本的 SFT、veRL 和 vLLM 依赖，创建独立的 ShopSimulator
 环境，校验并解压商品数据，构建搜索索引，并应用经过版本和哈希检查的 veRL 补丁。
 
+如果已有可用的训练环境（例如已配置好的 Ascend NPU / veRL 环境），只安装
+ShopSimulator：
+
+```bash
+bash scripts/setup.sh --shopsim-only
+```
+
+这个模式只安装独立的 Python 3.10 环境中的 ShopSimulator 依赖，并准备商品数据和
+搜索索引；不会执行主环境的 `uv sync`，也不会安装训练依赖或修改已有 veRL。
+仍需安装 `uv`；可用 `SHOPSIM_PYTHON=/path/to/python3.10` 指定现有解释器。
+ShopSimulator 服务使用 CPU，无需加载模型或占用 NPU。
+
 ### 2. 启动 ShopSimulator
 
 在第一个终端运行并保持服务：
@@ -242,6 +254,9 @@ bash scripts/start_environment.sh
 ```
 
 服务默认监听 `http://127.0.0.1:5700`。
+启动输出和服务控制台日志追加到 `outputs/shopsimulator/server.log`。
+可通过 `SHOPSIM_PORT`、`SHOPSIM_ENV_SLOTS` 调整端口和环境槽位数；槽位数与 NPU
+数量无关。服务以前台方式运行，按 `Ctrl+C` 停止。
 
 ### 3. 运行 Baseline
 

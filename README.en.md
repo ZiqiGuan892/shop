@@ -222,6 +222,18 @@ This installs the pinned SFT and GRPO dependencies, creates the isolated
 ShopSimulator environment, verifies and expands the product archive, builds the
 search index and applies the version-checked veRL patch.
 
+If training already works in your existing environment (including an Ascend NPU
+environment), install only the CPU simulator:
+
+```bash
+bash scripts/setup.sh --shopsim-only
+```
+
+This mode prepares ShopSimulator in its own Python 3.10 environment, product
+data and search index. It skips the main environment sync and veRL patch.
+It still requires `uv`; set `SHOPSIM_PYTHON=/path/to/python3.10` to select an
+existing interpreter.
+
 ### 2. Start ShopSimulator
 
 Keep this terminal running:
@@ -231,6 +243,9 @@ bash scripts/start_environment.sh
 ```
 
 The service listens on `http://127.0.0.1:5700`.
+Console output is appended to `outputs/shopsimulator/server.log`. Use
+`SHOPSIM_PORT` and `SHOPSIM_ENV_SLOTS` to change the port and slot count; slots
+are independent of the NPU count. Press `Ctrl+C` to stop the foreground service.
 
 ### 3. Evaluate the baseline
 
