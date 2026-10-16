@@ -145,7 +145,8 @@ def build_experiment(
     if experiment["stage"] == "sft":
         command = [
             _python(root),
-            "scripts/train_lora_sft.py",
+            "scripts/train_sft.py",
+            "--finetuning-type", "lora",
             "--model", str(model or "Qwen/Qwen3.5-2B"),
             "--train", str(train_data or root / "data/sft/train.jsonl"),
             "--validation", str(validation_data or root / "data/sft/validation.jsonl"),
@@ -179,7 +180,7 @@ def build_experiment(
     command = [
         _python(root),
         "scripts/train_grpo.py",
-        "--model", str(model or root / "outputs/models/sft-merged"),
+        "--model", str(model or root / "outputs/models/sft-full"),
         "--train-data", str(train_data or root / "data/grpo/train.parquet"),
         "--val-data", str(validation_data or root / "data/grpo/validation.parquet"),
         "--output", str(output),

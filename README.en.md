@@ -303,15 +303,24 @@ Set `EVAL_ROLLOUT_PRINT_EVERY=1` for every step, or `0` to disable trace printin
 
 Stop the model server before training so it releases the GPU.
 
-### 4. Train and evaluate SFT
+### 4. Full-parameter SFT and evaluation
+
+First generate `outputs/sft-collection/clean/train.jsonl` and `validation.jsonl`
+using the two-step [collection workflow](docs/data-collection.md). The launcher
+uses the active Python environment and Transformers Trainer, saves a complete
+model and does not merge an adapter. `BASE_MODEL` overrides the default
+`../models/Qwen3.5-2B`; `PYTHON_BIN` selects a prepared interpreter explicitly.
 
 ```bash
 bash scripts/sft.sh
-bash scripts/serve_model.sh outputs/models/sft-merged
+bash scripts/serve_model.sh outputs/models/sft-full
 bash scripts/evaluate.sh sft
 ```
 
-Stop the model server again before GRPO.
+Set `SFT_NPROC_PER_NODE=8` for optional single-node DDP. Each device still holds
+the full training state; use a validated `--deepspeed CONFIG.json` when sharding
+is required. See [SFT](docs/sft.md). Previously reported LoRA results do not
+measure this new full fine-tuning recipe. Stop the model server again before GRPO.
 
 ### 5. Train GRPO
 
@@ -405,8 +414,10 @@ Most users only need these environment variables:
 | `SHOPSIM_BASE_URL` | `http://127.0.0.1:5700` |
 | `LLM_BASE_URL` | `http://127.0.0.1:8000/v1` |
 | `SERVED_MODEL_NAME` | `shopping-agent` |
-| `SFT_ADAPTER_DIR` | `outputs/models/sft-lora` |
-| `SFT_MERGED_DIR` | `outputs/models/sft-merged` |
+| `SFT_TRAIN_FILE` | `outputs/sft-collection/clean/train.jsonl` |
+| `SFT_VALIDATION_FILE` | `outputs/sft-collection/clean/validation.jsonl` |
+| `SFT_OUTPUT_DIR` | `outputs/models/sft-full` |
+| `SFT_NPROC_PER_NODE` | `1` |
 
 Advanced GRPO overrides can be appended after `--`:
 
@@ -426,7 +437,7 @@ bash scripts/grpo.sh --logger swanlab
 ## Documentation
 
 - [Data collection and dataset provenance](docs/data-collection.md)
-- [LoRA SFT](docs/sft.md)
+- [SFT: full fine-tuning and optional LoRA](docs/sft.md)
 - [GRPO with veRL](docs/grpo.md)
 - [Held-out evaluation](docs/evaluation.md)
 - [Final-200 Clean evaluation dataset](docs/evaluation-dataset.md)

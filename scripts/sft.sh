@@ -2,22 +2,68 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3.5-2B}"
-ADAPTER_DIR="${SFT_ADAPTER_DIR:-$ROOT/outputs/models/sft-lora}"
-MERGED_DIR="${SFT_MERGED_DIR:-$ROOT/outputs/models/sft-merged}"
+
+if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
+  cat <<'HELP'
+Usage: bash scripts/sft.sh [training options...]
+
+Run full-parameter SFT with the active Python environment (or PYTHON_BIN).
+BASE_MODEL           Local model directory or Hugging Face model ID
+                     (default: ../models/Qwen3.5-2B beside the repository)
+SFT_TRAIN_FILE       Default: outputs/sft-collection/clean/train.jsonl
+SFT_VALIDATION_FILE  Default: outputs/sft-collection/clean/validation.jsonl
+SFT_OUTPUT_DIR       Default: outputs/models/sft-full (complete model; no merge)
+SFT_NPROC_PER_NODE   Default: 1; use e.g. 8 for single-node torchrun/DDP
+
+Extra options go to scripts/train_sft.py, e.g. --learning-rate 2e-5,
+--epochs 3, --resume-from-checkpoint PATH, --deepspeed CONFIG.json.
+Use the SFT_* variables above to change input/output files.
+HELP
+  exit 0
+fi
+
+for argument in "$@"; do
+  case "$argument" in
+    --finetuning-type|--finetuning-type=*|--qlora|--qlora=*|--train|--train=*|--validation|--validation=*|--output|--output=*)
+      echo "sft.sh uses full fine-tuning; configure files through SFT_TRAIN_FILE, SFT_VALIDATION_FILE and SFT_OUTPUT_DIR." >&2
+      exit 2
+      ;;
+  esac
+done
+
+BASE_MODEL="${BASE_MODEL:-${MODEL_ROOT:-$ROOT/../models}/Qwen3.5-2B}"
+TRAIN_FILE="${SFT_TRAIN_FILE:-$ROOT/outputs/sft-collection/clean/train.jsonl}"
+VALIDATION_FILE="${SFT_VALIDATION_FILE:-$ROOT/outputs/sft-collection/clean/validation.jsonl}"
+OUTPUT_DIR="${SFT_OUTPUT_DIR:-$ROOT/outputs/models/sft-full}"
+NPROC="${SFT_NPROC_PER_NODE:-1}"
+if [[ ! "$NPROC" =~ ^[1-9][0-9]*$ ]]; then
+  echo "SFT_NPROC_PER_NODE must be a positive integer." >&2
+  exit 2
+fi
 
 cd "$ROOT"
-"$ROOT/.venv/bin/python" scripts/train_lora_sft.py \
+for data_file in "$TRAIN_FILE" "$VALIDATION_FILE"; do
+  if [[ ! -f "$data_file" || ! -s "$data_file" ]]; then
+    echo "SFT data file is missing or empty: $data_file" >&2
+    echo "Run scripts/clean_sft_data.py first." >&2
+    exit 1
+  fi
+done
+source "$ROOT/scripts/lib/python_runtime.sh"
+init_project_python "$ROOT" SFT
+export PYTHONUNBUFFERED=1
+launcher=("$PROJECT_PYTHON")
+if (( NPROC > 1 )); then
+  launcher+=(-m torch.distributed.run --standalone --nnodes=1 --nproc-per-node "$NPROC")
+fi
+echo "SFT mode: full; processes: $NPROC; complete model output: $OUTPUT_DIR" >&2
+exec "${launcher[@]}" scripts/train_sft.py \
+  --finetuning-type full \
   --model "$BASE_MODEL" \
-  --train data/sft/train.jsonl \
-  --validation data/sft/validation.jsonl \
-  --output "$ADAPTER_DIR" \
+  --train "$TRAIN_FILE" \
+  --validation "$VALIDATION_FILE" \
+  --output "$OUTPUT_DIR" \
   --dtype auto \
   --gradient-checkpointing \
-  --attention-implementation sdpa
-
-exec "$ROOT/.venv/bin/python" scripts/merge_lora_adapter.py \
-  --base-model "$BASE_MODEL" \
-  --adapter "$ADAPTER_DIR" \
-  --output "$MERGED_DIR" \
-  --bf16
+  --attention-implementation sdpa \
+  "$@"

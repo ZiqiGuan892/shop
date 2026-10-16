@@ -53,7 +53,7 @@ flowchart LR
 | 模拟环境 | 商品、搜索、页面状态、规格、购买和终止 | `environments/ShopSimulator/shop_env/` |
 | 环境适配 | HTTP 客户端、工具到动作转换、合法性检查、观察投影 | `src/shopping_grpo/environment/` |
 | 数据采集 | 调用教师、保存轨迹、验收与训练消息清理 | `src/shopping_grpo/collection/`、`scripts/collect_sft_data.py` |
-| SFT | 模板渲染、监督标签、LoRA 训练与课程编排 | `training/sft/`、`scripts/train_lora_sft.py` |
+| SFT | 模板渲染、监督标签、LoRA 训练与课程编排 | `training/sft/`、`scripts/train_sft.py` |
 | GRPO | veRL AgentLoop、在线交互、奖励校验、动态采样、可选 TRACE | `training/grpo/`、`configs/grpo.yaml` |
 | 评测 | 轨迹规范化、严格成功、Rubric、Judge 隔离、统计和报告 | `src/shopping_grpo/evaluation/` |
 
@@ -119,7 +119,7 @@ Pure V4 文件有 1,192 行、1,192 个唯一 task ID。元数据记载合并时
 
 ### 4.1 学习目标和监督范围
 
-SFT 使用 Transformers 与 PEFT，对基座模型增加 LoRA 参数。一个样本是完整多轮轨迹，包含 system、user、assistant 和 tool 消息，通过目标模型的 chat template 渲染。标签先全部设置为 `-100`，再打开 Assistant 回合对应的 token：
+当前主入口 `scripts/sft.sh` 使用 Transformers Trainer + PyTorch/Accelerate，读取新清洗的训练集/验证集进行全量微调，直接保存到 `outputs/models/sft-full`。可选 LoRA 模式才使用 PEFT；本节保留的 LoRA 配置和已有结果不代表新全量方案的实测效果。一个样本是完整多轮轨迹，包含 system、user、assistant 和 tool 消息，通过目标模型的 chat template 渲染。标签先全部设置为 `-100`，再打开 Assistant 回合对应的 token：
 
 ```text
 SFT loss = Assistant 受监督 token 的负对数似然
@@ -130,11 +130,13 @@ system / user / tool observation 的标签 = -100
 
 这一区别会影响结果解释：自然语言说明较多的来源，即使轨迹行数少，也可能贡献较多监督 token，让小模型学到解释、反复核验或输出结束文本的习惯。工具观察被 mask，只表示不要求模型预测观察文本；它仍然作为上下文供模型学习下一步动作。
 
-### 4.2 LoRA 及默认参数
+### 4.2 全量入口与 LoRA 对照参数
+
+主入口默认全量学习率 `2e-5`，3 个 epoch，读取 `outputs/sft-collection/clean/` 下新数据，使用当前 Python。全量分支不导入 PEFT、不注入 adapter、不调用合并脚本，启动时报告可训练参数数量；其余主要序列/批量设置见 [SFT 指南](sft.md)。以下表格描述显式 `--finetuning-type lora` 的对照配置。
 
 LoRA 将可训练更新限制在低秩适配参数中，避免更新所有基座权重。SFT 目标层不仅包括常见注意力投影和 MLP，还包含 Qwen3.5 Gated DeltaNet 的 `in_proj_qkv`、`in_proj_z`、`in_proj_b`、`in_proj_a`、`out_proj` 等投影，防止只覆盖部分文本层。
 
-| 参数 | 普通 SFT 默认值 |
+| 参数 | 可选 LoRA 配置 |
 |---|---:|
 | 基座 | `Qwen/Qwen3.5-2B` |
 | 最大序列长度 | 24,576 |
@@ -147,13 +149,13 @@ LoRA 将可训练更新限制在低秩适配参数中，避免更新所有基座
 | Attention | shell 入口选择 SDPA |
 | QLoRA / Liger | 可选，默认不启用 |
 
-超长样本会整条丢弃，而不是强行截断，避免把决定性证据或最终工具调用裁掉。训练产物是 LoRA adapter，合并后得到可供模型服务或 GRPO 使用的模型。历史 run config 记载验证 loss 从 0.3365 降至 0.3189、0.3147；这说明模仿目标更容易预测，不能单独证明购物成功率持续上升。
+超长样本会整条丢弃，而不是强行截断，避免把决定性证据或最终工具调用裁掉。LoRA 模式的产物是 adapter，合并后才能供模型服务或 GRPO 使用；全量模式直接输出完整模型。历史 run config 记载验证 loss 从 0.3365 降至 0.3189、0.3147；这说明模仿目标更容易预测，不能单独证明购物成功率持续上升。
 
-依据：[训练脚本](../scripts/train_lora_sft.py)、[标签构建](../src/shopping_grpo/training/sft/dataset.py)、[普通 SFT 入口](../scripts/sft.sh)。
+依据：[训练脚本](../scripts/train_sft.py)、[标签构建](../src/shopping_grpo/training/sft/dataset.py)、[普通 SFT 入口](../scripts/sft.sh)。
 
-### 4.3 当前课程方案
+### 4.3 可选 LoRA 课程方案
 
-当前 [SFT 指南](sft.md) 指向 Pure V4 三阶段课程：
+`scripts/sft_curriculum.sh` 保留显式 LoRA 的 Pure V4 三阶段课程，主入口不自动选择该方案：
 
 | 阶段 | 累计训练桶 | Train / development | Epoch | 学习率 |
 |---|---|---:|---:|---:|
@@ -165,7 +167,7 @@ LoRA 将可训练更新限制在低秩适配参数中，避免更新所有基座
 
 累计课程也产生了隐含权重：foundation 的 256 个训练任务各出现 3 次，constraints 的 543 个各出现 2 次，strategy 的 274 个只出现 1 次。总计 2,128 次名义行曝光。原始训练集合中 simple/medium/hard 约为 23.9%/66.8%/9.3%，按累计曝光计算变为约 36.1%/59.2%/4.7%。因此它有意强化基础操作，却降低了 hard 任务的相对曝光份额；“课程一定优于一次性训练”目前并无同口径结果证明。
 
-还存在一个入口衔接问题：课程最终模型在 `outputs/models/sft-curriculum/stage-c/merged`，而 GRPO launcher 默认读取 `outputs/models/sft-merged`。`train_grpo.py` 会依据 `--model` 覆盖传入环境中的 `GRPO_MODEL_PATH`，仅设置同名环境变量不足以切换起点。使用课程模型时，应显式传 `--model`。
+还存在一个入口衔接问题：课程最终模型在 `outputs/models/sft-curriculum/stage-c/merged`，而 GRPO launcher 默认读取 `outputs/models/sft-full`。`train_grpo.py` 会依据 `--model` 覆盖传入环境中的 `GRPO_MODEL_PATH`，仅设置同名环境变量不足以切换起点。使用课程模型时，应显式传 `--model`。
 
 依据：[课程 manifest](../data/sft_curriculum/manifest.json)、[课程权重说明](../data/sft_curriculum/README.md)、[课程编排](../scripts/run_sft_curriculum.py)、[GRPO launcher](../scripts/train_grpo.py)。
 
@@ -434,7 +436,7 @@ README 记录单张 NVIDIA RTX 6000 96 GB 的历史耗时：SFT 三个 epoch 约
 
 另一个防泄漏边界是：SFT 入口会检查盲测任务，但 GRPO preflight 主要校验 Parquet 文件存在等运行条件，没有对任意传入的 `--train-data` 重做同等级任务交集检查。当前提交数据无泄漏，不代表未来替换数据自动安全。应在数据进入梯度训练前统一检查最终测试集隔离。
 
-依据：[SFT blind guard 调用](../scripts/train_lora_sft.py)、[GRPO preflight](../scripts/check_grpo_runtime.py)、[blind guard 实现](../src/shopping_grpo/evaluation/blind_guard.py)、[现有奖励测试](../tests/test_shopping_reward.py)。
+依据：[SFT blind guard 调用](../scripts/train_sft.py)、[GRPO preflight](../scripts/check_grpo_runtime.py)、[blind guard 实现](../src/shopping_grpo/evaluation/blind_guard.py)、[现有奖励测试](../tests/test_shopping_reward.py)。
 
 ## 10 后续怎样得到可信的最终结论
 
@@ -475,7 +477,7 @@ GRPO 的 dry-run 仍要求模型目录含配置和权重，不能把缺少模型
 | 项目约束 | [AGENTS.md](../AGENTS.md) |
 | 场景和入门 | [README](../README.md)、[源码导航](../src/shopping_grpo/README.md) |
 | 数据来源 | [采集文档](data-collection.md)、[SFT metadata](../data/sft/metadata.json)、[Pure V4 metadata](../data/sft_pure_v4/metadata.json) |
-| SFT 实现 | [训练脚本](../scripts/train_lora_sft.py)、[mask 与渲染](../src/shopping_grpo/training/sft/dataset.py) |
+| SFT 实现 | [训练脚本](../scripts/train_sft.py)、[mask 与渲染](../src/shopping_grpo/training/sft/dataset.py) |
 | 课程方案 | [课程 manifest](../data/sft_curriculum/manifest.json)、[编排脚本](../scripts/run_sft_curriculum.py) |
 | GRPO 实现 | [配置](../configs/grpo.yaml)、[AgentLoop](../src/shopping_grpo/training/grpo/adapter/agent_loop.py)、[动态采样](../src/shopping_grpo/training/grpo/dynamic_sampling.py) |
 | Reward | [规则说明](reward-v3.md)、[实现](../environments/ShopSimulator/shop_env/web_agent_site/engine/reward.py) |

@@ -312,14 +312,23 @@ EVAL_ROLLOUT_PRINT_EVERY=5 EVAL_PROGRESS_INTERVAL=15 \
 
 开始训练前请停止模型服务，释放 GPU 显存。
 
-### 4. 训练并评估 SFT
+### 4. 全量 SFT 并评估
+
+先按[数据采集文档](docs/data-collection.md)生成
+`outputs/sft-collection/clean/train.jsonl` 和 `validation.jsonl`。
+主入口使用当前 Python 环境，通过 Transformers Trainer 更新完整模型参数；
+无需 LoRA adapter 或合并步骤。基模默认是仓库旁 `models/Qwen3.5-2B`，可用
+`BASE_MODEL` 指定实际模型目录，`PYTHON_BIN` 可指定已配置的 Python。
 
 ```bash
 bash scripts/sft.sh
-bash scripts/serve_model.sh outputs/models/sft-merged
+bash scripts/serve_model.sh outputs/models/sft-full
 bash scripts/evaluate.sh sft
 ```
 
+单机多卡可显式设置 `SFT_NPROC_PER_NODE=8 bash scripts/sft.sh`。
+这是 DDP，各卡保留完整训练状态；大模型需要分片时可传已验证的
+`--deepspeed 配置.json`，详见 [SFT 指南](docs/sft.md)。已有 LoRA 评测分数不代表新全量方案效果。
 完成评估后再次停止模型服务。
 
 ### 5. 训练 GRPO
@@ -415,8 +424,10 @@ tests/                           核心单元、入口和 Wheel 安装检查
 | `SHOPSIM_BASE_URL` | `http://127.0.0.1:5700` |
 | `LLM_BASE_URL` | `http://127.0.0.1:8000/v1` |
 | `SERVED_MODEL_NAME` | `shopping-agent` |
-| `SFT_ADAPTER_DIR` | `outputs/models/sft-lora` |
-| `SFT_MERGED_DIR` | `outputs/models/sft-merged` |
+| `SFT_TRAIN_FILE` | `outputs/sft-collection/clean/train.jsonl` |
+| `SFT_VALIDATION_FILE` | `outputs/sft-collection/clean/validation.jsonl` |
+| `SFT_OUTPUT_DIR` | `outputs/models/sft-full` |
+| `SFT_NPROC_PER_NODE` | `1` |
 
 GRPO 的高级 Hydra 参数可以追加在 `--` 后：
 
@@ -436,7 +447,7 @@ bash scripts/grpo.sh --logger swanlab
 ## 文档导航
 
 - [数据采集与数据来源](docs/data-collection.md)
-- [LoRA SFT](docs/sft.md)
+- [SFT：全量微调与可选 LoRA](docs/sft.md)
 - [使用 veRL 进行 GRPO](docs/grpo.md)
 - [留出集评估](docs/evaluation.md)
 - [Final-200 Clean 测试集说明](docs/evaluation-dataset.md)

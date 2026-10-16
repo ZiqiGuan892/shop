@@ -192,9 +192,9 @@ python -m json.tool outputs/sft-collection/clean/reject_stats.json
 wc -l outputs/sft-collection/clean/{train,validation}.jsonl
 ```
 
-后续 SFT 应将 `--train`、`--validation` 指向上述新文件。
-`scripts/sft.sh` 仍固定使用 `data/sft/`，课程训练仍使用它自己的数据和 manifest；
-单独完成这两步不会自动切换训练入口，也不会覆盖仓库冻结数据。
+后续运行 `bash scripts/sft.sh` 即默认使用上述新训练集/验证集，复用当前 Python
+进行全量微调。若清洗到自定义目录，可设置 `SFT_TRAIN_FILE`、`SFT_VALIDATION_FILE`。
+可选课程训练仍使用它自己的数据和 manifest；这两步不会覆盖仓库冻结数据。
 原始响应和采集产物保存在被 Git 忽略的 `outputs/`，不要提交 API key 或原始响应。
 
 ## What a training row contains

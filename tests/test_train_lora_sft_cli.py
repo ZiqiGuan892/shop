@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.train_lora_sft import (
+from scripts.train_sft import (
     DEFAULT_TARGET_MODULES,
     _load_preprocessing_components,
     _loss_only_eval_trainer_class,
@@ -113,7 +113,7 @@ class TrainLoraSftCliTest(unittest.TestCase):
             sys,
             "argv",
             [
-                "train_lora_sft.py",
+                "train_sft.py", "--finetuning-type", "lora",
                 "--model",
                 "/models/Qwen3.5-0.8B",
                 "--train",
@@ -152,7 +152,7 @@ class TrainLoraSftCliTest(unittest.TestCase):
             sys,
             "argv",
             [
-                "train_lora_sft.py",
+                "train_sft.py", "--finetuning-type", "lora",
                 "--model",
                 "Qwen/Qwen3.5-2B",
                 "--train",
@@ -178,7 +178,7 @@ class TrainLoraSftCliTest(unittest.TestCase):
             sys,
             "argv",
             [
-                "train_lora_sft.py",
+                "train_sft.py", "--finetuning-type", "lora",
                 "--model",
                 "Qwen/Qwen3.5-2B",
                 "--train",
@@ -222,7 +222,7 @@ class TrainLoraSftCliTest(unittest.TestCase):
             sys,
             "argv",
             [
-                "train_lora_sft.py",
+                "train_sft.py", "--finetuning-type", "lora",
                 "--model", "Qwen/Qwen3.5-2B",
                 "--train", "outputs/train.jsonl",
                 "--output", "outputs/adapter",
@@ -276,7 +276,7 @@ class TrainLoraSftCliTest(unittest.TestCase):
             sys,
             "argv",
             [
-                "train_lora_sft.py",
+                "train_sft.py", "--finetuning-type", "lora",
                 "--model",
                 "Qwen/Qwen3.5-2B",
                 "--train",
@@ -302,7 +302,7 @@ class TrainLoraSftCliTest(unittest.TestCase):
             sys,
             "argv",
             [
-                "train_lora_sft.py",
+                "train_sft.py", "--finetuning-type", "lora",
                 "--model", "Qwen/Qwen3.5-2B",
                 "--train", "outputs/train.jsonl",
                 "--output", "outputs/adapter",

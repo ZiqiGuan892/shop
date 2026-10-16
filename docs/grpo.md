@@ -25,7 +25,7 @@ unknown veRL version.
 
 ## Inputs
 
-- Initial policy: `outputs/models/sft-merged`
+- Initial policy: `outputs/models/sft-full` (the complete model saved by `scripts/sft.sh`)
 - Train set: `data/grpo/train.parquet` (1,000 tasks)
 - Validation set: `data/grpo/validation.parquet` (50 tasks)
 - Environment: ShopSimulator Environment v2.1

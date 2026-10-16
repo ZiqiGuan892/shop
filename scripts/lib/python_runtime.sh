@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Shared interpreter selection for the evaluation and report entry points.
+# Shared interpreter selection for evaluation, reports and SFT.
 
 init_project_python() {
   local repo_root="$1"
+  local runtime_label="${2:-evaluation/report}"
   PROJECT_PYTHON=""
   if [[ -n "${PYTHON_BIN:-}" ]]; then
     if ! PROJECT_PYTHON="$(command -v "$PYTHON_BIN")"; then
@@ -23,5 +24,5 @@ init_project_python() {
   # Use this checkout even when only ShopSimulator was installed. This does not
   # install packages or change the existing training/inference environment.
   export PYTHONPATH="$repo_root/src${PYTHONPATH:+:$PYTHONPATH}"
-  printf 'Using evaluation/report Python: %s\n' "$PROJECT_PYTHON" >&2
+  printf 'Using %s Python: %s\n' "$runtime_label" "$PROJECT_PYTHON" >&2
 }

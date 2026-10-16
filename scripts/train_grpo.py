@@ -15,7 +15,7 @@ DEFAULT_CONFIG = ROOT / "configs/grpo.yaml"
 DEFAULT_AGENT_CONFIG = ROOT / "configs/agent_loop.yaml"
 DEFAULT_TOOL_CONFIG = ROOT / "configs/tools.json"
 DEFAULT_MANIFEST = ROOT / "data/environment.json"
-DEFAULT_MODEL = ROOT / "outputs/models/sft-merged"
+DEFAULT_MODEL = ROOT / "outputs/models/sft-full"
 DEFAULT_TRAIN_DATA = ROOT / "data/grpo/train.parquet"
 DEFAULT_VAL_DATA = ROOT / "data/grpo/validation.parquet"
 

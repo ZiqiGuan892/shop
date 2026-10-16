@@ -48,7 +48,8 @@ def build_stage_commands(
         )
         train = [
             str(python),
-            str(ROOT / "scripts/train_lora_sft.py"),
+            str(ROOT / "scripts/train_sft.py"),
+            "--finetuning-type", "lora",
             "--model",
             str(model),
             "--train",

@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""对验收后的 Shopping tool-calling 数据进行最小 LoRA SFT。"""
+"""使用 Transformers Trainer 对 Shopping 轨迹进行全量或 LoRA SFT。"""
 
 import argparse
 import json
+import os
+import sys
 import time as _time
 from functools import partial
+from importlib.util import find_spec
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
 from shopping_grpo.evaluation.artifacts import ArtifactError
 from shopping_grpo.evaluation.blind_guard import guard_blind_final
@@ -31,8 +37,11 @@ DEFAULT_TARGET_MODULES = (
 )
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="使用 Transformers + PEFT 执行 Shopping LoRA SFT")
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="使用 Transformers Trainer 执行 Shopping SFT", allow_abbrev=False,
+    )
+    parser.add_argument("--finetuning-type", choices=("full", "lora"), default="full")
     parser.add_argument("--model", required=True, help="Hugging Face 模型名或本地模型目录")
     parser.add_argument("--train", type=Path, required=True, help="训练 SFT JSONL")
     parser.add_argument("--validation", type=Path, default=None, help="可选验证 SFT JSONL")
@@ -48,14 +57,15 @@ def parse_args():
         default=None,
         help="课程阶段；训练/验证都从同一 manifest 的累计 bucket 中读取。",
     )
-    parser.add_argument("--output", type=Path, required=True, help="LoRA adapter 输出目录")
-    # 24k 可保留当前真实轨迹的约 93%，48G 显存配合 batch=1 与梯度检查点可稳定训练。
+    parser.add_argument("--output", type=Path, required=True, help="完整模型或 LoRA adapter 输出目录")
+    # 保留长程轨迹；全量训练的显存需求取决于模型大小和所用的分片策略。
     parser.add_argument("--max-length", type=int, default=24576)
     parser.add_argument("--epochs", type=float, default=3)
     parser.add_argument("--per-device-train-batch-size", type=int, default=1)
     parser.add_argument("--per-device-eval-batch-size", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--learning-rate", type=float, default=None,
+                        help="默认 full=2e-5，lora=1e-4；可显式覆盖。")
     parser.add_argument("--warmup-ratio", type=float, default=0.03)
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
@@ -65,7 +75,7 @@ def parse_args():
         "--dtype",
         choices=("auto", "bf16", "fp16", "fp32"),
         default="auto",
-        help="模型与训练精度；auto 在 CUDA 上优先 bf16，其次 fp16，CPU 使用 fp32。",
+        help="模型与训练精度；auto 在 NPU/CUDA 上优先 bf16，其次 fp16，CPU 使用 fp32。",
     )
     parser.add_argument(
         "--bf16",
@@ -86,6 +96,8 @@ def parse_args():
     )
     parser.add_argument("--qlora", action="store_true", help="以 NF4 4-bit 加载基座，并按 PEFT 标准预处理")
     parser.add_argument("--gradient-checkpointing", action="store_true")
+    parser.add_argument("--deepspeed", type=Path, default=None,
+                        help="可选现有 DeepSpeed JSON 配置；依赖须在当前环境中配置好。")
     parser.add_argument("--logging-steps", type=int, default=5)
     parser.add_argument("--save-total-limit", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
@@ -103,7 +115,12 @@ def parse_args():
         default="online",
         help="SwanLab 在线同步或只保存在本地；仅 --swanlab 时生效。",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.finetuning_type == "full" and args.qlora:
+        parser.error("--qlora requires --finetuning-type lora; full fine-tuning cannot use QLoRA")
+    if args.learning_rate is None:
+        args.learning_rate = 2e-5 if args.finetuning_type == "full" else 1e-4
+    return args
 
 
 def _curriculum_task_ids(path, stage, split):
@@ -120,10 +137,15 @@ def _curriculum_task_ids(path, stage, split):
         raise SystemExit(f"课程清单缺少阶段 {stage!r} 的 {split} task IDs") from exc
 
 
-def _training_dependencies():
+def _training_dependencies(finetuning_type="full"):
     try:
         import torch
-        from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
+        # Register Ascend before Accelerate/Trainer device selection. Bind each
+        # process before dtype/memory probes can lazily initialize an NPU context.
+        if not torch.cuda.is_available() and find_spec("torch_npu") is not None:
+            import torch_npu  # noqa: F401
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            torch.npu.set_device(int(os.environ.get("LOCAL_RANK", "0")))
         from transformers import (
             AutoConfig,
             AutoModelForCausalLM,
@@ -136,7 +158,16 @@ def _training_dependencies():
             TrainingArguments,
         )
     except ImportError as exc:
-        raise SystemExit("缺少训练依赖。请执行：uv sync --extra sft") from exc
+        raise SystemExit(
+            f"当前 Python ({sys.executable}) 缺少兼容的训练依赖：{exc}。"
+            "请检查现有环境的 PyTorch、Transformers、Accelerate 和对应设备支持。"
+        ) from exc
+    LoraConfig = TaskType = get_peft_model = prepare_model_for_kbit_training = None
+    if finetuning_type == "lora":
+        try:
+            from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
+        except ImportError as exc:
+            raise SystemExit("LoRA 模式需要当前 Python 环境安装 PEFT。") from exc
     return (
         torch,
         LoraConfig,
@@ -173,16 +204,49 @@ def _model_load_kwargs(args, dtype, bits_and_bytes_config):
 
 
 def _prepare_model_for_training(model, args, prepare_model_for_kbit_training):
-    """按 PEFT 推荐顺序准备量化模型与梯度检查点。"""
+    """准备量化模型与梯度检查点；全量模式不依赖 PEFT。"""
     if args.qlora:
         model = prepare_model_for_kbit_training(
             model, use_gradient_checkpointing=args.gradient_checkpointing
         )
     if args.gradient_checkpointing:
         model.config.use_cache = False
-        if not args.qlora and hasattr(model, "enable_input_require_grads"):
+        if (args.finetuning_type == "lora" and not args.qlora
+                and hasattr(model, "enable_input_require_grads")):
             model.enable_input_require_grads()
     return model
+
+
+def _configure_trainable_model(model, args, lora_config=None, task_type=None, get_peft_model=None):
+    if args.finetuning_type == "full":
+        for parameter in model.parameters():
+            parameter.requires_grad_(True)
+    else:
+        model = get_peft_model(model, lora_config(
+            task_type=task_type.CAUSAL_LM, r=args.lora_r,
+            lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
+            bias="none", target_modules=list(args.target_modules),
+        ))
+    def size(parameter):
+        return getattr(parameter, "ds_numel", parameter.numel())
+
+    total = sum(size(parameter) for parameter in model.parameters())
+    trainable = sum(size(parameter) for parameter in model.parameters() if parameter.requires_grad)
+    print(f"  finetuning_type={args.finetuning_type} trainable_params={trainable:,}/{total:,}")
+    return model, {"total": total, "trainable": trainable}
+
+
+def _accelerator(torch):
+    if hasattr(torch, "npu") and torch.npu.is_available():
+        return "NPU", torch.npu
+    if torch.cuda.is_available():
+        return "CUDA", torch.cuda
+    return "CPU", None
+
+
+def _peak_memory(torch):
+    name, device = _accelerator(torch)
+    return name, device.max_memory_allocated() / 1024**3 if device is not None else 0.0
 
 
 def _validate_optional_training_dependencies(args):
@@ -214,12 +278,9 @@ def _resolve_dtype(args, torch):
             raise SystemExit("--bf16 cannot be combined with a non-bf16 --dtype")
         requested = "bf16"
     if requested == "auto":
-        if torch.cuda.is_available():
-            requested = (
-                "bf16"
-                if torch.cuda.is_bf16_supported()
-                else "fp16"
-            )
+        _, device = _accelerator(torch)
+        if device is not None:
+            requested = "bf16" if device.is_bf16_supported() else "fp16"
         else:
             requested = "fp32"
     mapping = {
@@ -239,8 +300,9 @@ def _swanlab_config(args):
     except ImportError as exc:
         raise SystemExit("缺少 SwanLab。请执行：uv sync --extra sft") from exc
 
+    prefix = "full" if args.finetuning_type == "full" else f"lora-r{args.lora_r}"
     run_name = args.swanlab_run_name or (
-        f"lora-r{args.lora_r}-bs{args.per_device_train_batch_size}"
+        f"{prefix}-bs{args.per_device_train_batch_size}"
         f"x{args.gradient_accumulation_steps}-lr{args.learning_rate}"
     )
     return "swanlab", run_name
@@ -335,6 +397,73 @@ def _collate(batch, pad_token_id, torch):
     return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
 
+def _validate_sft_splits(args, train_task_ids=None, validation_task_ids=None):
+    """Validate the exact selected train/development tasks before loading a model."""
+    def task_ids(path, selected):
+        if not path.is_file() or not path.stat().st_size:
+            raise SystemExit(f"SFT 数据文件不存在或为空：{path}")
+        try:
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()]
+            ids = {int(row["task_id"]) for row in rows}
+        except (ValueError, KeyError, TypeError) as exc:
+            raise SystemExit(f"SFT 数据格式无效：{path}（每行必须包含 task_id）") from exc
+        ids = ids if selected is None else ids & selected
+        if not ids:
+            raise SystemExit(f"SFT 数据中没有所选任务：{path}")
+        return ids
+
+    train = task_ids(args.train, train_task_ids)
+    validation = task_ids(args.validation, validation_task_ids) if args.validation else set()
+    if train & validation:
+        raise SystemExit(f"SFT 训练/验证 task_id 重叠：{sorted(train & validation)[:10]}")
+    evaluation = ROOT / "data/evaluation/tasks.jsonl"
+    final_ids = task_ids(evaluation, None)
+    if (train | validation) & final_ids:
+        raise SystemExit("SFT 数据包含 data/evaluation/tasks.jsonl 的评测任务")
+
+
+def _training_argument_kwargs(args, dtype_name, has_validation, is_multimodal):
+    kwargs = dict(
+        output_dir=str(args.output), num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        per_device_eval_batch_size=args.per_device_eval_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        learning_rate=args.learning_rate, warmup_ratio=args.warmup_ratio,
+        bf16=dtype_name == "bf16", fp16=dtype_name == "fp16",
+        gradient_checkpointing=args.gradient_checkpointing,
+        use_liger_kernel=args.liger_kernel, logging_steps=args.logging_steps,
+        save_strategy="epoch", save_total_limit=args.save_total_limit,
+        eval_strategy="epoch" if has_validation else "no", prediction_loss_only=True,
+        max_steps=args.max_steps if args.max_steps > 0 else -1,
+        remove_unused_columns=False, seed=args.seed, optim="adamw_torch",
+    )
+    if args.finetuning_type == "full":
+        # Text-only Qwen3.5 batches do not use the visual branch. Non-reentrant
+        # checkpointing supports DDP's unused-parameter detection in this case.
+        kwargs["ddp_find_unused_parameters"] = is_multimodal
+        if args.gradient_checkpointing:
+            kwargs["gradient_checkpointing_kwargs"] = {"use_reentrant": False}
+    if args.deepspeed:
+        kwargs["deepspeed"] = str(args.deepspeed)
+    return kwargs
+
+
+def _validate_deepspeed_config(path):
+    if path is None:
+        return
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+        zero = config.get("zero_optimization") or {}
+    except (OSError, ValueError, AttributeError) as exc:
+        raise SystemExit(f"无法读取 DeepSpeed JSON 配置：{path}") from exc
+    if str(zero.get("stage")) == "3" and zero.get("stage3_gather_16bit_weights_on_model_save") is not True:
+        raise SystemExit(
+            "ZeRO-3 需要 zero_optimization.stage3_gather_16bit_weights_on_model_save=true，"
+            "才能导出可直接用于评测/GRPO 的完整模型。"
+        )
+
+
 def main():
     _start_time = _time.time()
     args = parse_args()
@@ -352,6 +481,8 @@ def main():
         validation_task_ids = _curriculum_task_ids(
             args.curriculum_manifest, args.curriculum_stage, "validation"
         )
+    _validate_sft_splits(args, train_task_ids, validation_task_ids)
+    _validate_deepspeed_config(args.deepspeed)
     try:
         guard_blind_final(
             [args.train, *([args.validation] if args.validation else [])],
@@ -375,7 +506,7 @@ def main():
         Trainer,
         TrainerCallback,
         TrainingArguments,
-    ) = _training_dependencies()
+    ) = _training_dependencies(args.finetuning_type)
 
     # --- Progress callback: 只补充 Trainer 默认没有的耗时和显存指标。 ---
     class ProgressCallback(TrainerCallback):
@@ -390,15 +521,15 @@ def main():
             if not state.is_world_process_zero or not logs or "loss" not in logs:
                 return control
             elapsed = _time.time() - self.step_start if self.step_start else 0.0
-            gpu_mem = torch.cuda.max_memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
+            device_name, gpu_mem = _peak_memory(torch)
             logs["step_time_s"] = round(elapsed, 3)
-            logs["gpu_peak_memory_gib"] = round(gpu_mem, 3)
+            logs["device_peak_memory_gib"] = round(gpu_mem, 3)
             eta_seconds = (state.max_steps - state.global_step) * elapsed if state.global_step else 0
             eta_str = f"{eta_seconds/60:.0f}min" if eta_seconds > 0 else "?"
             print(
                 f"[step {state.global_step}/{state.max_steps}] "
                 f"loss={float(logs['loss']):.4f} step_t={elapsed:.1f}s "
-                f"GPU={gpu_mem:.1f}GiB ETA={eta_str}"
+                f"{device_name}={gpu_mem:.1f}GiB ETA={eta_str}"
             )
             return control
 
@@ -465,18 +596,26 @@ def main():
 
     dtype_name, dtype = _resolve_dtype(args, torch)
     model_class = AutoModelForMultimodalLM if is_multimodal else AutoModelForCausalLM
+    report_to, run_name = _swanlab_config(args)
+    # Construct before from_pretrained so an explicitly provided ZeRO-3 config
+    # can partition model initialization as required by Transformers.
+    training_args = TrainingArguments(
+        **_training_argument_kwargs(args, dtype_name, bool(validation_examples), is_multimodal),
+        report_to=report_to, run_name=run_name,
+    )
 
-    # ---- Phase 2: 加载模型 + LoRA ----
+    # ---- Phase 2: 加载模型，选择全量或 LoRA 参数 ----
     print(f"\n{'='*60}")
-    print("  Phase 2/3: 加载模型与 LoRA")
+    print(f"  Phase 2/3: 加载模型（{args.finetuning_type}）")
     print(f"{'='*60}")
     print(f"  model={args.model}")
     print(f"  revision={args.revision or 'default/local'}")
     print(f"  dtype={dtype_name}")
     print(f"  attention_implementation={args.attention_implementation}")
     print(f"  qlora={args.qlora}")
-    print(f"  lora_r={args.lora_r} lora_alpha={args.lora_alpha}")
-    print(f"  lora_targets={','.join(args.target_modules)}")
+    if args.finetuning_type == "lora":
+        print(f"  lora_r={args.lora_r} lora_alpha={args.lora_alpha}")
+        print(f"  lora_targets={','.join(args.target_modules)}")
     model = model_class.from_pretrained(
         args.model,
         **_model_load_kwargs(
@@ -490,22 +629,12 @@ def main():
         args,
         prepare_model_for_kbit_training=prepare_model_for_kbit_training,
     )
-    model = get_peft_model(
-        model,
-        LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
-            bias="none",
-            target_modules=list(args.target_modules),
-        ),
+    model, parameter_counts = _configure_trainable_model(
+        model, args, lora_config=LoraConfig, task_type=TaskType, get_peft_model=get_peft_model,
     )
-    model.print_trainable_parameters()
 
     args.output.mkdir(parents=True, exist_ok=True)
-    report_to, run_name = _swanlab_config(args)
-    if report_to == "swanlab":
+    if report_to == "swanlab" and training_args.process_index == 0:
         import swanlab
         swanlab.init(
             project=args.swanlab_project,
@@ -514,28 +643,6 @@ def main():
             logdir=str(args.output / "swanlab"),
         )
         print(f"[SwanLab] project={args.swanlab_project} run={run_name}")
-    training_args = TrainingArguments(
-        output_dir=str(args.output),
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_eval_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
-        warmup_ratio=args.warmup_ratio,
-        bf16=dtype_name == "bf16",
-        fp16=dtype_name == "fp16",
-        gradient_checkpointing=args.gradient_checkpointing,
-        use_liger_kernel=args.liger_kernel,
-        logging_steps=args.logging_steps,
-        save_strategy="epoch",
-        save_total_limit=args.save_total_limit,
-        eval_strategy="epoch" if validation_examples else "no",
-        report_to=report_to,
-        run_name=run_name,
-        max_steps=args.max_steps if args.max_steps > 0 else -1,
-        remove_unused_columns=False,
-        seed=args.seed,
-    )
     trainer_class = _loss_only_eval_trainer_class(
         Trainer,
         enable_skip_logits=args.liger_kernel and is_multimodal,
@@ -550,11 +657,13 @@ def main():
     )
     result = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     trainer.save_model(str(args.output))
+    if not trainer.is_world_process_zero():
+        return
     chat_template.save_pretrained(str(args.output))
 
     # --- 训练完成摘要 ---
     total_time = _time.time() - _start_time
-    gpu_peak = torch.cuda.max_memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
+    device_name, gpu_peak = _peak_memory(torch)
 
     train_summary = {
         "train_examples": len(train_examples),
@@ -562,7 +671,10 @@ def main():
         "train_loss": result.training_loss,
         "metrics": result.metrics,
         "log_history": trainer.state.log_history,
-        "peak_gpu_memory_gib": round(gpu_peak, 2),
+        "finetuning_type": args.finetuning_type,
+        "parameter_counts": parameter_counts,
+        "device": device_name,
+        "peak_device_memory_gib": round(gpu_peak, 2),
         "total_time_minutes": round(total_time / 60, 1) if total_time else None,
         "monitoring": {
             "backend": report_to,
@@ -583,8 +695,9 @@ def main():
     print("  训练完成")
     print(f"  train_loss={result.training_loss:.4f}")
     print(f"  eval_loss={result.metrics.get('eval_loss', 'N/A')}")
-    print(f"  peak_gpu={gpu_peak:.1f} GiB")
-    print(f"  adapter → {args.output}")
+    print(f"  peak_{device_name}={gpu_peak:.1f} GiB")
+    artifact = "完整模型" if args.finetuning_type == "full" else "LoRA adapter"
+    print(f"  {artifact} → {args.output}")
     print(f"{'='*60}\n")
 
     (args.output / "train_summary.json").write_text(
@@ -592,7 +705,7 @@ def main():
         encoding="utf-8",
     )
 
-    print(f"LoRA adapter 已保存到 {args.output}")
+    print(f"{artifact} 已保存到 {args.output}")
 
 
 if __name__ == "__main__":
