@@ -9,9 +9,12 @@ LLM_BASE_URL="${LLM_BASE_URL:-http://127.0.0.1:8000/v1}"
 LLM_API_KEY="${LLM_API_KEY:-EMPTY}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-shopping-agent}"
 
+source "$ROOT/scripts/lib/python_runtime.sh"
+init_project_python "$ROOT"
+
 mkdir -p "$OUTPUT_DIR"
 cd "$ROOT"
-"$ROOT/.venv/bin/python" scripts/evaluate_shop_benchmark.py \
+"$PROJECT_PYTHON" scripts/evaluate_shop_benchmark.py \
   --benchmark data/evaluation/tasks.jsonl \
   --output "$OUTPUT_DIR/trajectories.jsonl" \
   --summary "$OUTPUT_DIR/summary.json" \
@@ -20,4 +23,4 @@ cd "$ROOT"
   --llm-base-url "$LLM_BASE_URL" \
   --api-key "$LLM_API_KEY"
 
-"$ROOT/.venv/bin/python" scripts/build_eval_report.py --run-dir "$OUTPUT_DIR"
+"$PROJECT_PYTHON" scripts/build_eval_report.py --run-dir "$OUTPUT_DIR"

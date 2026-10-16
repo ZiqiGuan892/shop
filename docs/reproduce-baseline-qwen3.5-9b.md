@@ -362,7 +362,7 @@ vllm serve /models/Qwen3.5-9B \
 
 工具解析与非思考模式依据 [Qwen 官方模型说明](https://huggingface.co/Qwen/Qwen3.5-9B)，服务端参数见 [vLLM 0.23.0 CLI](https://docs.vllm.ai/en/v0.23.0/cli/serve/)。这是针对本仓库协议组合的启动配置，需要通过下面的接口和开发任务检查确认在实际设备可用。
 
-`scripts/serve_model.sh` 支持复用当前环境中的 vLLM，也可通过 `PYTHON_BIN` 指定解释器，并透传模型名称之后的服务参数；找不到当前环境的启动程序时才回退到仓库 `.venv/bin/vllm`。脚本默认模型仍为 2B，不会自动配置 NPU 容器、并行度或非思考模式，因此本步骤保留上面的完整 9B 服务命令以明确评测配置。
+`scripts/serve_model.sh` 支持复用当前环境中的 vLLM，也可通过 `PYTHON_BIN` 指定解释器，并透传模型名称之后的服务参数；找不到当前环境的启动程序时才回退到仓库 `.venv/bin/vllm`。传入已有模型目录时直接使用；短名称或 `Qwen/名称` 默认解析到仓库同级的 `models/名称`，可通过 `MODEL_ROOT` 更换根目录，缺少本地模型时不会自动下载。脚本默认模型仍为 2B，不会自动配置 NPU 容器、并行度或非思考模式，因此本步骤保留上面的完整 9B 服务命令以明确评测配置。
 
 ## 7 检查接口并运行开发任务
 
@@ -518,7 +518,7 @@ set -o pipefail
 .venv/bin/python scripts/build_eval_report.py --run-dir "$EVAL_OUTPUT_DIR"
 ```
 
-在相同环境变量和默认评测参数下，仓库的 `bash scripts/baseline.sh` 也是入口，它会调用 `evaluate.sh baseline` 并生成报告。上面展开命令便于核对实际协议，完成后无需再运行一次封装入口。
+在相同环境变量和默认评测参数下，仓库的 `bash scripts/baseline.sh` 也是入口，它会调用 `evaluate.sh baseline` 并生成报告。该入口优先使用显式 `PYTHON_BIN`，其次查找当前 `PATH` 中的 `python` / `python3`，最后回退到仓库 `.venv/bin/python`；它会将仓库 `src` 加入 `PYTHONPATH`，支持仅安装 ShopSimulator 的场景。若要固定使用本节创建的环境，可执行 `PYTHON_BIN="$PWD/.venv/bin/python" bash scripts/baseline.sh`。上面展开命令便于核对实际协议，完成后无需再运行一次封装入口。
 
 当前采集器按任务顺序执行。`trajectories.jsonl` 每题追加一行；`summary.json` 在采集正常结束后生成。耗时取决于模型吞吐、任务步骤和请求耗时，不应根据卡数直接推定。
 

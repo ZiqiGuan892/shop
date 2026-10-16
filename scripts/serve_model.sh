@@ -8,6 +8,9 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 Usage: bash scripts/serve_model.sh [MODEL] [vLLM serve options...]
 
 MODEL defaults to Qwen/Qwen3.5-2B. Additional options are passed to vLLM.
+Existing model directories are used directly. Otherwise, short names or
+organization/name identifiers resolve to MODEL_ROOT/name (local files only).
+MODEL_ROOT defaults to the models directory beside this repository.
 Launcher selection: PYTHON_BIN override, vllm on PATH, Python with vllm on
 PATH, then the repository's .venv/bin/vllm.
 
@@ -24,8 +27,27 @@ fi
 
 MODEL="${1:-Qwen/Qwen3.5-2B}"
 if (( $# > 0 )); then shift; fi
+MODEL_ROOT="${MODEL_ROOT:-$ROOT/../models}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-shopping-agent}"
 LLM_PORT="${LLM_PORT:-8000}"
+
+# Keep explicit absolute/relative paths intact. Names such as Qwen/Qwen3.5-4B
+# refer to the same local checkpoint as Qwen3.5-4B; never download on a typo.
+if [[ -d "$MODEL" ]]; then
+  model_dir="$MODEL"
+elif [[ "$MODEL" == /* || "$MODEL" == ./* || "$MODEL" == ../* || "$MODEL" == */*/* || "$MODEL" == */ ]]; then
+  echo "Model directory does not exist: $MODEL" >&2
+  exit 1
+else
+  model_dir="$MODEL_ROOT/${MODEL##*/}"
+fi
+if [[ ! -d "$model_dir" ]]; then
+  echo "Local model directory does not exist: $model_dir" >&2
+  echo "Set MODEL_ROOT to the directory containing your models, or pass an existing model directory." >&2
+  exit 1
+fi
+MODEL="$(cd "$model_dir" && pwd)"
+printf 'Using local model: %s\n' "$MODEL" >&2
 
 launcher=()
 if [[ -n "${PYTHON_BIN:-}" ]]; then

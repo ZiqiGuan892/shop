@@ -18,9 +18,14 @@ BASH = os.environ.get("BASH_BIN") or (shutil.which("bash") if os.name != "nt" el
 class ServeModelScriptTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="shopping-serve-test-")
-        self.root = Path(self.temporary.name).resolve()
-        self.assertTrue(self.root.is_relative_to(Path(tempfile.gettempdir()).resolve()))
+        self.workspace = Path(self.temporary.name).resolve()
+        self.assertTrue(self.workspace.is_relative_to(Path(tempfile.gettempdir()).resolve()))
         self.addCleanup(self.temporary.cleanup)
+        self.root = self.workspace / "repo"
+        self.root.mkdir()
+        self.models = self.workspace / "models"
+        for name in ("Qwen3.5-2B", "Qwen3.5-4B"):
+            (self.models / name).mkdir(parents=True)
         self.bin = self.root / "fake-bin"
         self.bin.mkdir()
         self.script = self.root / "scripts/serve_model.sh"
@@ -50,9 +55,9 @@ class ServeModelScriptTest(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def run_script(self, *arguments, **extra_env):
+    def run_script(self, *arguments, cwd=None, **extra_env):
         environment = dict(os.environ)
-        for name in ("PYTHON_BIN", "SERVED_MODEL_NAME", "LLM_PORT"):
+        for name in ("PYTHON_BIN", "SERVED_MODEL_NAME", "LLM_PORT", "MODEL_ROOT"):
             environment.pop(name, None)
         environment.update(
             FIXTURE_BIN=self.bin.as_posix(),
@@ -72,19 +77,30 @@ exec bash "$@"
 '''
         return subprocess.run(
             [BASH, "-c", shell, "fixture", self.script.as_posix(), *arguments],
-            cwd=self.root, env=environment, capture_output=True, text=True, timeout=30,
+            cwd=cwd or self.root, env=environment, capture_output=True, text=True, timeout=30,
         )
 
     def recorded(self, result):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return self.record.read_bytes().decode("utf-8").split("\0")[:-1]
 
+    @staticmethod
+    def shell_path(path):
+        # Git Bash can mount Windows Temp at /tmp; ask Bash for its actual path.
+        result = subprocess.run(
+            [BASH, "-c", 'cd "$1" && pwd', "path", path.as_posix()],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        return result.stdout.strip()
+
     def test_current_cli_precedes_repository_environment(self):
         self.launcher("fake-bin/vllm", "current-cli")
         self.launcher(".venv/bin/vllm", "repo-cli")
         result = self.run_script("Qwen/Qwen3.5-4B")
         arguments = self.recorded(result)
-        self.assertEqual(arguments[:3], ["current-cli", "serve", "Qwen/Qwen3.5-4B"])
+        self.assertEqual(arguments[:3], [
+            "current-cli", "serve", self.shell_path(self.models / "Qwen3.5-4B"),
+        ])
         self.assertIn("Using vLLM launcher:", result.stderr)
 
     def test_python_package_without_cli_precedes_repository_environment(self):
@@ -93,12 +109,13 @@ exec bash "$@"
         arguments = self.recorded(self.run_script())
         self.assertEqual(arguments[:6], [
             "current-python", "-m", "vllm.entrypoints.cli.main",
-            "serve", "Qwen/Qwen3.5-2B", "--served-model-name",
+            "serve", self.shell_path(self.models / "Qwen3.5-2B"), "--served-model-name",
         ])
 
     def test_explicit_python_and_extra_arguments_preserve_boundaries(self):
         python = self.launcher("prepared env/bin/python", "explicit-python")
         self.launcher("fake-bin/vllm", "current-cli")
+        (self.root / "models/my model").mkdir(parents=True)
         extra = [
             "--enforce-eager", "--tensor-parallel-size", "4",
             "--default-chat-template-kwargs", '{"enable_thinking": false}',
@@ -109,7 +126,7 @@ exec bash "$@"
         ))
         self.assertEqual(arguments[:5], [
             "explicit-python", "-m", "vllm.entrypoints.cli.main",
-            "serve", "models/my model",
+            "serve", self.shell_path(self.root / "models/my model"),
         ])
         self.assertEqual(arguments[-len(extra):], extra)
         self.assertEqual(arguments[5:9], ["--served-model-name", "my-agent", "--port", "9000"])
@@ -160,6 +177,44 @@ exec bash "$@"
         result = self.run_script("--help")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("PYTHON_BIN", result.stdout)
+        self.assertFalse(self.record.exists())
+
+    def test_short_name_resolves_against_sibling_models_from_another_cwd(self):
+        self.launcher("fake-bin/vllm", "cli")
+        # run_script normally uses the repository cwd; the script's location,
+        # not cwd, must determine the default models root.
+        arguments = self.recorded(self.run_script("Qwen3.5-4B", cwd=self.workspace))
+        self.assertEqual(arguments[2], self.shell_path(self.models / "Qwen3.5-4B"))
+
+    def test_custom_model_root_accepts_spaces(self):
+        self.launcher("fake-bin/vllm", "cli")
+        custom = self.root / "downloaded models"
+        (custom / "Qwen3.5-4B").mkdir(parents=True)
+        arguments = self.recorded(self.run_script(
+            "Qwen/Qwen3.5-4B", MODEL_ROOT=custom.as_posix(),
+        ))
+        self.assertEqual(arguments[2], self.shell_path(custom / "Qwen3.5-4B"))
+
+    def test_explicit_model_directory_precedes_model_root(self):
+        self.launcher("fake-bin/vllm", "cli")
+        model = self.root / "outputs/models/sft-merged"
+        model.mkdir(parents=True)
+        arguments = self.recorded(self.run_script(model.as_posix()))
+        self.assertEqual(arguments[2], self.shell_path(model))
+
+    def test_missing_model_does_not_start_vllm_or_download(self):
+        self.launcher("fake-bin/vllm", "cli")
+        result = self.run_script("Qwen/missing-model")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Local model directory does not exist", result.stderr)
+        self.assertIn("MODEL_ROOT", result.stderr)
+        self.assertFalse(self.record.exists())
+
+    def test_missing_explicit_path_does_not_select_same_named_model(self):
+        self.launcher("fake-bin/vllm", "cli")
+        result = self.run_script("./missing/Qwen3.5-4B")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Model directory does not exist", result.stderr)
         self.assertFalse(self.record.exists())
 
 

@@ -262,11 +262,13 @@ bash scripts/start_environment.sh
 
 ### 3. 运行 Baseline
 
-在第二个终端启动基础模型：
+在第二个终端启动已下载的基础模型：
 
 ```bash
 bash scripts/serve_model.sh Qwen/Qwen3.5-2B
 ```
+
+模型默认从仓库同级的 `models` 目录查找：`Qwen3.5-4B` 和 `Qwen/Qwen3.5-4B` 都映射到 `../models/Qwen3.5-4B`（相对于仓库）。可设置 `export MODEL_ROOT=/path/to/models` 更换根目录，或直接传入已有模型目录。找不到本地目录会报错，不会自动下载模型；启动时会打印实际模型路径。
 
 已配置独立的 vLLM / Ascend 环境时，先激活该环境再执行。脚本优先使用当前 `PATH` 中的 vLLM（或安装了 vLLM 的 Python），找不到时才使用仓库的 `.venv/bin/vllm`；也可通过 `PYTHON_BIN` 明确指定解释器，无需重新安装训练环境：
 
@@ -280,6 +282,12 @@ PYTHON_BIN="$(command -v python)" bash scripts/serve_model.sh Qwen/Qwen3.5-4B --
 
 ```bash
 bash scripts/baseline.sh
+```
+
+`baseline.sh`、`evaluate.sh`、`report.sh` 和 `report_all.sh` 使用同一解释器选择规则：显式 `PYTHON_BIN` → 当前 `PATH` 中的 `python` / `python3` → 仓库 `.venv/bin/python`。脚本将当前仓库的 `src` 加入 `PYTHONPATH`，因此仅安装 ShopSimulator 时也能导入评测代码，无需安装训练依赖。评测和报告生成使用同一个 Python（要求 3.10 或更新版本）：
+
+```bash
+PYTHON_BIN="$(command -v python)" bash scripts/baseline.sh
 ```
 
 开始训练前请停止模型服务，释放 GPU 显存。

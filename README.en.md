@@ -251,11 +251,13 @@ are independent of the NPU count. Press `Ctrl+C` to stop the foreground service.
 
 ### 3. Evaluate the baseline
 
-Start the base model server in a second terminal:
+Start an already downloaded base model in a second terminal:
 
 ```bash
 bash scripts/serve_model.sh Qwen/Qwen3.5-2B
 ```
+
+Models are resolved from the `models` directory beside the repository by default: both `Qwen3.5-4B` and `Qwen/Qwen3.5-4B` select `../models/Qwen3.5-4B` relative to the repository. Set `export MODEL_ROOT=/path/to/models` to change the root, or pass an existing model directory directly. Missing local directories produce an error instead of downloading a model. The launcher prints the resolved model path.
 
 If you already have a vLLM / Ascend environment, activate it first. The script prefers vLLM (or a Python with vLLM installed) on the current `PATH`, then falls back to the repository's `.venv/bin/vllm`. Set `PYTHON_BIN` to select an interpreter explicitly without reinstalling your training environment:
 
@@ -269,6 +271,12 @@ Evaluate it in a third terminal:
 
 ```bash
 bash scripts/baseline.sh
+```
+
+`baseline.sh`, `evaluate.sh`, `report.sh`, and `report_all.sh` share interpreter selection: explicit `PYTHON_BIN`, then `python` / `python3` on `PATH`, then the repository's `.venv/bin/python`. They add this checkout's `src` to `PYTHONPATH`, so a simulator-only setup can import evaluation code without installing training dependencies. Evaluation and report generation use the same interpreter (Python 3.10 or newer):
+
+```bash
+PYTHON_BIN="$(command -v python)" bash scripts/baseline.sh
 ```
 
 Stop the model server before training so it releases the GPU.
