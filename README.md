@@ -268,6 +268,14 @@ bash scripts/start_environment.sh
 bash scripts/serve_model.sh Qwen/Qwen3.5-2B
 ```
 
+已配置独立的 vLLM / Ascend 环境时，先激活该环境再执行。脚本优先使用当前 `PATH` 中的 vLLM（或安装了 vLLM 的 Python），找不到时才使用仓库的 `.venv/bin/vllm`；也可通过 `PYTHON_BIN` 明确指定解释器，无需重新安装训练环境：
+
+```bash
+PYTHON_BIN="$(command -v python)" bash scripts/serve_model.sh Qwen/Qwen3.5-4B --enforce-eager
+```
+
+模型名称之后的参数会原样传给 `vllm serve`，例如 `--tensor-parallel-size 4`。`--enforce-eager` 可用于关闭图捕获；具体并行度应根据模型和设备设置。使用 `python -m pip show vllm` 检查当前 Python 的安装情况；单独的 `pip show vllm` 可能对应另一个环境。脚本会打印实际使用的启动程序，启动后的导入或设备错误会保留原始报错。
+
 在第三个终端评估：
 
 ```bash

@@ -257,6 +257,14 @@ Start the base model server in a second terminal:
 bash scripts/serve_model.sh Qwen/Qwen3.5-2B
 ```
 
+If you already have a vLLM / Ascend environment, activate it first. The script prefers vLLM (or a Python with vLLM installed) on the current `PATH`, then falls back to the repository's `.venv/bin/vllm`. Set `PYTHON_BIN` to select an interpreter explicitly without reinstalling your training environment:
+
+```bash
+PYTHON_BIN="$(command -v python)" bash scripts/serve_model.sh Qwen/Qwen3.5-4B --enforce-eager
+```
+
+Arguments after the model are passed through to `vllm serve`, including `--tensor-parallel-size 4`. `--enforce-eager` disables graph capture; choose parallelism for your model and devices. Check the selected Python with `python -m pip show vllm`, since a standalone `pip` can belong to another environment. The script prints its selected launcher and preserves startup errors.
+
 Evaluate it in a third terminal:
 
 ```bash

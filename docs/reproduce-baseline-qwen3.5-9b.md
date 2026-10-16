@@ -362,7 +362,7 @@ vllm serve /models/Qwen3.5-9B \
 
 工具解析与非思考模式依据 [Qwen 官方模型说明](https://huggingface.co/Qwen/Qwen3.5-9B)，服务端参数见 [vLLM 0.23.0 CLI](https://docs.vllm.ai/en/v0.23.0/cli/serve/)。这是针对本仓库协议组合的启动配置，需要通过下面的接口和开发任务检查确认在实际设备可用。
 
-仓库原有 `scripts/serve_model.sh` 默认从 `.venv/bin/vllm` 启动 2B 模型，也没有上述 NPU 容器和非思考配置，因此本步骤使用这里的服务命令。
+`scripts/serve_model.sh` 支持复用当前环境中的 vLLM，也可通过 `PYTHON_BIN` 指定解释器，并透传模型名称之后的服务参数；找不到当前环境的启动程序时才回退到仓库 `.venv/bin/vllm`。脚本默认模型仍为 2B，不会自动配置 NPU 容器、并行度或非思考模式，因此本步骤保留上面的完整 9B 服务命令以明确评测配置。
 
 ## 7 检查接口并运行开发任务
 
