@@ -279,6 +279,7 @@ def collect_for_task(
     max_steps=30,
     tools=None,
     attempt_index=0,
+    progress=None,
 ):
     """执行一个任务并返回完整轨迹；所有异常都会被写入轨迹后再释放环境。"""
     trajectory = {
@@ -321,6 +322,8 @@ def collect_for_task(
 
         while len(trajectory["steps"]) < int(max_steps):
             # 先请求模型，再校验动作；工具结果会追加到 messages，成为下一轮上下文。
+            if progress is not None:
+                progress("phase", phase="模型请求（含 tokenize / 重试）", steps=len(trajectory["steps"]))
             assistant = client.complete(messages, tool_schemas)
             context_tokens = getattr(client, "last_context_tokens", None)
             if context_tokens is not None:
@@ -384,10 +387,14 @@ def collect_for_task(
                 return trajectory
             messages.append(assistant)
             # 只有通过当前 observation 守卫的调用才会触碰环境并消耗一个执行步骤。
+            if progress is not None:
+                progress("phase", phase=f"环境动作: {name}", steps=len(trajectory["steps"]))
             step = _execute_tool_call(env, tool_call, len(trajectory["steps"]))
             raw_observation = step["observation"]
             projector = getattr(client, "project_observation", None)
             if projector is not None:
+                if progress is not None:
+                    progress("phase", phase="观测处理（含 tokenize）", steps=len(trajectory["steps"]))
                 visible_observation, projection = projector(
                     step["tool_name"],
                     raw_observation,
@@ -409,6 +416,9 @@ def collect_for_task(
                 trajectory["terminal_result"] = step["result"]
                 trajectory["final_reward"] = step["reward"]
                 trajectory["done"] = True
+            if progress is not None:
+                progress("step", trajectory=trajectory)
+            if step["done"]:
                 return trajectory
         else:
             trajectory["status"] = "max_steps"
@@ -430,6 +440,8 @@ def collect_for_task(
             "traceback": traceback.format_exc(),
         }
     finally:
+        if progress is not None:
+            progress("phase", phase="释放环境", steps=len(trajectory["steps"]))
         try:
             env.release()
         except Exception as exc:
@@ -458,17 +470,27 @@ def collect_tasks(
     max_steps=30,
     env_factory=ShopAgentEnv,
     attempts_per_task=1,
+    progress=None,
 ):
     attempts_per_task = int(attempts_per_task)
     if attempts_per_task < 1:
         raise ValueError("attempts_per_task must be at least 1")
     done = completed_task_attempts(output_path)
+    if progress is not None:
+        tasks = list(tasks)
+        existing = sum(
+            (int(task["task_id"]), attempt_index) in done
+            for task in tasks for attempt_index in range(attempts_per_task)
+        )
+        progress("start", total=len(tasks) * attempts_per_task, existing=existing)
     written = []
     for task in tasks:
         task_id = int(task["task_id"])
         for attempt_index in range(attempts_per_task):
             if (task_id, attempt_index) in done:
                 continue
+            if progress is not None:
+                progress("task_start", task_id=task_id, attempt_index=attempt_index, max_steps=max_steps)
             trajectory = collect_for_task(
                 task,
                 client=client,
@@ -476,9 +498,12 @@ def collect_tasks(
                 base_url=base_url,
                 max_steps=max_steps,
                 attempt_index=attempt_index,
+                progress=progress,
             )
             append_jsonl(output_path, [trajectory])
             written.append(trajectory)
+            if progress is not None:
+                progress("task_end", trajectory=trajectory)
             if _is_infrastructure_failure(trajectory):
                 raise CollectionInfrastructureError(
                     "collection infrastructure failure; stopped before the next task"

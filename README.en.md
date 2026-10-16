@@ -279,6 +279,18 @@ bash scripts/baseline.sh
 PYTHON_BIN="$(command -v python)" bash scripts/baseline.sh
 ```
 
+Evaluation prints progress every 15 seconds, including the active task, recorded count, environment steps, current phase, elapsed time, and ETA. ETA uses the mean duration of tasks completed in this invocation; existing records are counted separately when resuming. An estimate appears after the first new task finishes. Recorded tasks include failures and are not a strict-success count.
+
+Every 5 environment steps within a task, the evaluator prints newly collected rollout entries: model messages, tool arguments, environment results, model-visible observations, rewards, and rejected actions. Task completion flushes the remaining entries and terminal status, including zero-step final replies or errors. These are untruncated excerpts from the collected records, with no extra model calls or changes to the JSONL format. Configure the intervals and capture the console output with:
+
+```bash
+mkdir -p outputs/evaluation/baseline
+EVAL_ROLLOUT_PRINT_EVERY=5 EVAL_PROGRESS_INTERVAL=15 \
+  bash scripts/baseline.sh 2>&1 | tee -a outputs/evaluation/baseline/console.log
+```
+
+Set `EVAL_ROLLOUT_PRINT_EVERY=1` for every step, or `0` to disable trace printing. Set `EVAL_PROGRESS_INTERVAL=0` for progress only at task boundaries. The Python CLI equivalents are `--rollout-print-every` and `--progress-interval`. Both logs are flushed immediately to stderr. Code updates take effect in newly started evaluation processes, not an already running process.
+
 Stop the model server before training so it releases the GPU.
 
 ### 4. Train and evaluate SFT

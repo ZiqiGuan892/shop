@@ -5,6 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
+from shopping_grpo.evaluation.progress import EvaluationProgress
 from shopping_grpo.evaluation.summary import summarize_trajectories
 from shopping_grpo.evaluation.rollout import OpenAIChatClient, collect_tasks, load_tasks
 
@@ -49,6 +50,14 @@ def parse_args():
     parser.add_argument("--observation-detail-token-budget", type=int, default=4096)
     parser.add_argument("--observation-generic-token-budget", type=int, default=768)
     parser.add_argument("--observation-search-top-k", type=int, default=20)
+    parser.add_argument(
+        "--progress-interval", type=int, default=15,
+        help="每隔多少秒输出任务进度和 ETA；0 仅在任务开始/结束时输出。",
+    )
+    parser.add_argument(
+        "--rollout-print-every", type=int, default=5,
+        help="每隔多少个环境步骤打印新增真实轨迹，任务结束补齐；0 关闭轨迹打印。",
+    )
     return parser.parse_args()
 
 
@@ -72,6 +81,8 @@ def main():
         raise SystemExit("--context-window 必须大于 --max-tokens 与安全余量之和")
     if args.observation_token_budget < 0:
         raise SystemExit("--observation-token-budget 不能为负数")
+    if args.progress_interval < 0 or args.rollout_print_every < 0:
+        raise SystemExit("--progress-interval 和 --rollout-print-every 不能为负数")
     tasks = load_tasks(args.benchmark)
     client = OpenAIChatClient(
         model=args.model,
@@ -89,13 +100,17 @@ def main():
         observation_generic_token_budget=args.observation_generic_token_budget,
         observation_search_top_k=args.observation_search_top_k,
     )
-    collect_tasks(
-        tasks,
-        client=client,
-        output_path=args.output,
-        base_url=args.base_url,
-        max_steps=args.max_steps,
-    )
+    with EvaluationProgress(
+        interval=args.progress_interval, rollout_print_every=args.rollout_print_every,
+    ) as progress:
+        collect_tasks(
+            tasks,
+            client=client,
+            output_path=args.output,
+            base_url=args.base_url,
+            max_steps=args.max_steps,
+            progress=progress,
+        )
     summary = summarize_trajectories(
         [task["task_id"] for task in tasks], _read_jsonl(args.output)
     )

@@ -56,6 +56,7 @@ fi
         for key in (
             "PYTHON_BIN", "EVAL_OUTPUT_DIR", "SHOPSIM_BASE_URL", "LLM_BASE_URL",
             "LLM_API_KEY", "SERVED_MODEL_NAME", "PYTHONPATH",
+            "EVAL_PROGRESS_INTERVAL", "EVAL_ROLLOUT_PRINT_EVERY",
         ):
             environment.pop(key, None)
         environment.update(FIXTURE_BIN=self.bin.as_posix(), FIXTURE_RECORD=self.record.as_posix())
@@ -85,6 +86,8 @@ exec bash "$@"
         self.assertIn("arg=<scripts/evaluate_shop_benchmark.py>", text)
         self.assertIn("arg=<data/evaluation/tasks.jsonl>", text)
         self.assertIn("arg=<scripts/build_eval_report.py>", text)
+        self.assertIn("arg=<--progress-interval>\narg=<15>", text)
+        self.assertIn("arg=<--rollout-print-every>\narg=<5>", text)
         self.assertIn("/outputs/evaluation/baseline/trajectories.jsonl>", text)
         paths = [line for line in text.splitlines() if line.startswith("path=")]
         self.assertEqual(len(paths), 2)
@@ -98,6 +101,14 @@ exec bash "$@"
         self.assertEqual(text.count("runtime=explicit\n"), 2)
         self.assertNotIn("runtime=current", text)
         self.assertNotIn("runtime=repo", text)
+
+    def test_progress_and_rollout_intervals_can_be_configured(self):
+        self.python("fake-bin/python", "current")
+        text = self.recorded(self.run_script(
+            "baseline.sh", EVAL_PROGRESS_INTERVAL="10", EVAL_ROLLOUT_PRINT_EVERY="2",
+        ))
+        self.assertIn("arg=<--progress-interval>\narg=<10>", text)
+        self.assertIn("arg=<--rollout-print-every>\narg=<2>", text)
 
     def test_python3_fallback(self):
         self.python("fake-bin/python3", "python3")

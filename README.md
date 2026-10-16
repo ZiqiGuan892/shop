@@ -290,6 +290,18 @@ bash scripts/baseline.sh
 PYTHON_BIN="$(command -v python)" bash scripts/baseline.sh
 ```
 
+评测默认每 15 秒显示当前任务、已记录数量、环境步骤、所处阶段、累计耗时和预计剩余时间（ETA）。ETA 按本次新完成任务的平均耗时估算；续跑时会单独显示已有记录，首条新任务完成前暂不估时。“已记录”包括失败任务，不代表严格成功数。
+
+每个任务默认每 5 个环境步骤打印一段新增的真实 rollout：包括模型消息、工具调用参数、环境返回、模型可见 observation、奖励和动作拒绝记录。任务结束会补齐剩余轨迹和终止状态；没有执行环境步骤的最终回复或错误也会打印。日志直接取自采集记录，不额外请求模型、不截断 observation，也不改变 `trajectories.jsonl` 格式。可调整间隔并保存控制台日志：
+
+```bash
+mkdir -p outputs/evaluation/baseline
+EVAL_ROLLOUT_PRINT_EVERY=5 EVAL_PROGRESS_INTERVAL=15 \
+  bash scripts/baseline.sh 2>&1 | tee -a outputs/evaluation/baseline/console.log
+```
+
+`EVAL_ROLLOUT_PRINT_EVERY=1` 会逐步打印，设为 `0` 则只显示进度；`EVAL_PROGRESS_INTERVAL=0` 仅在任务开始/结束时显示进度。直接调用 Python 入口时对应 `--rollout-print-every` 和 `--progress-interval`。两类日志都写入 stderr 并立即刷新。更新代码只影响新启动的评测进程；正在运行的进程不会自动加载新日志逻辑。
+
 开始训练前请停止模型服务，释放 GPU 显存。
 
 ### 4. 训练并评估 SFT

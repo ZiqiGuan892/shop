@@ -41,6 +41,8 @@ class BenchmarkCliTest(unittest.TestCase):
         self.assertEqual(args.observation_detail_token_budget, 4096)
         self.assertEqual(args.observation_generic_token_budget, 768)
         self.assertEqual(args.observation_search_top_k, 20)
+        self.assertEqual(args.progress_interval, 15)
+        self.assertEqual(args.rollout_print_every, 5)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -21,6 +21,9 @@ cd "$ROOT"
   --base-url "$SHOPSIM_BASE_URL" \
   --model "$SERVED_MODEL_NAME" \
   --llm-base-url "$LLM_BASE_URL" \
-  --api-key "$LLM_API_KEY"
+  --api-key "$LLM_API_KEY" \
+  --progress-interval "${EVAL_PROGRESS_INTERVAL:-15}" \
+  --rollout-print-every "${EVAL_ROLLOUT_PRINT_EVERY:-5}"
 
+echo "Evaluation summary saved; building report in $OUTPUT_DIR" >&2
 "$PROJECT_PYTHON" scripts/build_eval_report.py --run-dir "$OUTPUT_DIR"
