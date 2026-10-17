@@ -131,8 +131,10 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         torch.cuda.is_available.assert_not_called()
 
     def test_v1_trainer_cannot_bypass_reviewed_shopping_hooks(self):
-        runtime.validate_trainer_backend(self.config)
-        self.config.trainer.use_v1 = False
+        # A vendor ppo_trainer may default to V1. Our overrides must select the
+        # hooked trainer explicitly, not rely on the guard's missing-key default.
+        self.assertIs(self.config.trainer.use_v1, False)
+        self.config = OmegaConf.merge({"trainer": {"use_v1": True}}, self.config)
         runtime.validate_trainer_backend(self.config)
         self.config.trainer.use_v1 = True
         with self.assertRaisesRegex(SystemExit, "trainer.use_v1=true"):

@@ -167,9 +167,11 @@ def validate_trainer_backend(config):
     if config.trainer.get("use_v1", False):
         raise SystemExit(
             "trainer.use_v1=true selects a different veRL trainer; the Shopping integration "
-            "currently requires the reviewed RayPPOTrainer path. Provide the selected source's "
-            "trainer/main_ppo.py, main_ppo_v0.py (if present), and trainer/config/ for port review."
+            "requires trainer.use_v1=false as set in configs/grpo.yaml. "
+            "Remove any trainer.use_v1=true override or set it to false in your custom config. "
+            "The selected server source must still pass the AgentLoop and dynamic-sampling checks."
         )
+    print("GRPO trainer selection: trainer.use_v1=false; Shopping requires RayPPOTrainer")
 
 
 def validate_device(config, torch):

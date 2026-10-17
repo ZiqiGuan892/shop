@@ -146,6 +146,9 @@ ray_kwargs:
       worker_process_setup_hook: shopping_grpo.training.grpo.compat.install_torch_padding_fallback
 
 trainer:
+  # Shopping sampling and TRACE hooks target RayPPOTrainer, not the V1 trainer.
+  # Override the server's ppo_trainer default without changing its veRL install.
+  use_v1: false
   total_epochs: 50
   total_training_steps: 500
   save_freq: 50

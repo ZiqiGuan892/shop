@@ -88,12 +88,48 @@ or Python 3.12 from the clean-install recipe. A working unrelated veRL training
 job does not establish that this Shopping AgentLoop, Qwen3.5 FSDP training,
 LoRA weight synchronization and dynamic sampler are supported in a custom fork.
 Passing preflight is necessary but is not an end-to-end NPU training validation.
-If a 0.9 fork resolves `trainer.use_v1=true`, preflight stops: that entry point
-can bypass the `RayPPOTrainer` hooks used here. Its `trainer/main_ppo.py`,
-`main_ppo_v0.py` (if present) and `trainer/config/` must be checked before porting
-the integration or selecting another backend. See the
-[upstream 0.9 launcher](https://github.com/volcengine/verl/blob/v0.9.0/verl/trainer/main_ppo.py);
-the server's development fork may differ from that release.
+
+`configs/grpo.yaml` explicitly sets `trainer.use_v1: false`, overriding the
+server's inherited V1 default. In the
+[upstream 0.9 launcher](https://github.com/volcengine/verl/blob/v0.9.0/verl/trainer/main_ppo.py),
+this selects `main_ppo_v0.TaskRunner`, which constructs `RayPPOTrainer`; the
+Shopping sampling and TRACE hooks target that class. This selects a trainer
+within the existing veRL installation; it does not downgrade veRL. Preflight
+still rejects an explicit `trainer.use_v1=true` override.
+
+The server's development fork may differ from that release. Selecting this
+backend only resolves the V1 configuration conflict; it does **not** verify
+the fork's worker/config APIs or port the dynamic-sampling patch. Keep that
+patch check enabled and run `bash scripts/grpo.sh --check-only` before training.
+If it reports an unreviewed or missing trainer patch, collect the actual source
+for review with the same Python and `VERL_ROOT` used by training:
+
+```bash
+PYTHONPATH="${VERL_ROOT:+$VERL_ROOT:}${PYTHONPATH:-}" "$PYTHON_BIN" - <<'PY'
+from pathlib import Path
+import tarfile
+import verl
+
+root = Path(verl.__file__).resolve().parent
+output = Path("outputs/verl-source-review.tar.gz")
+output.parent.mkdir(parents=True, exist_ok=True)
+with tarfile.open(output, "w:gz") as archive:
+    for name in (
+        "__init__.py", "version/version",
+        "trainer/main_ppo.py", "trainer/main_ppo_v0.py",
+        "trainer/ppo/ray_trainer.py", "trainer/config",
+        "workers/config", "experimental/agent_loop", "tools",
+    ):
+        path = root / name
+        if path.exists():
+            archive.add(path, arcname=f"verl/{name}")
+print(f"veRL {verl.__version__}: {root}")
+print(output.resolve())
+PY
+```
+
+This only exports source and configuration files for inspection; it does not
+start Ray, load model weights or modify the server's veRL checkout.
 
 `scripts/setup.sh` without arguments prepares the other pinned training dependencies
 and ShopSimulator. It does not install veRL or apply a trainer patch automatically,
