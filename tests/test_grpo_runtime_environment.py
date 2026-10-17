@@ -266,6 +266,99 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         self.assertIn("global trajectories=8", self.stdout.getvalue())
         runtime.validate_training_memory_budget(self.config)
 
+    def memory_budget_report(self):
+        self.stdout.seek(0)
+        self.stdout.truncate(0)
+        runtime.validate_training_memory_budget(self.config)
+        prefix = "GRPO training memory budget preflight passed: "
+        line = next(line for line in self.stdout.getvalue().splitlines() if line.startswith(prefix))
+        return json.loads(line[len(prefix):])
+
+    def test_memory_report_exposes_effective_actor_memory_settings(self):
+        report = self.memory_budget_report()
+        self.assertFalse(report["actor_calculate_entropy"])
+        self.assertEqual(report["actor_entropy_coeff"], 0.0)
+        self.assertTrue(report["actor_activation_offload"])
+        self.assertTrue(report["actor_gradient_checkpointing"])
+        self.assertTrue(report["actor_reshard_after_forward"])
+        self.assertFalse(report["actor_forward_prefetch"])
+
+        # Deliberate overrides remain available and must be reported accurately.
+        actor = self.config.actor_rollout_ref.actor
+        model = self.config.actor_rollout_ref.model
+        actor.calculate_entropy = True
+        actor.entropy_coeff = 0.01
+        model.enable_activation_offload = False
+        model.enable_gradient_checkpointing = False
+        actor.fsdp_config.reshard_after_forward = False
+        actor.fsdp_config.forward_prefetch = True
+        report = self.memory_budget_report()
+        self.assertTrue(report["actor_calculate_entropy"])
+        self.assertEqual(report["actor_entropy_coeff"], 0.01)
+        self.assertFalse(report["actor_activation_offload"])
+        self.assertFalse(report["actor_gradient_checkpointing"])
+        self.assertFalse(report["actor_reshard_after_forward"])
+        self.assertTrue(report["actor_forward_prefetch"])
+
+    def test_nonzero_entropy_weight_requires_entropy_computation(self):
+        actor = self.config.actor_rollout_ref.actor
+        actor.calculate_entropy = False
+        for coefficient in (0.01, -0.01):
+            with self.subTest(coefficient=coefficient):
+                actor.entropy_coeff = coefficient
+                with self.assertRaisesRegex(
+                    SystemExit, "nonzero entropy_coeff requires actor.calculate_entropy=true"
+                ):
+                    runtime.validate_training_memory_budget(self.config)
+
+    def test_nonfinite_entropy_weight_is_rejected(self):
+        for coefficient in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(coefficient=coefficient):
+                self.config.actor_rollout_ref.actor.entropy_coeff = coefficient
+                with self.assertRaisesRegex(SystemExit, "actor.entropy_coeff must be finite"):
+                    runtime.validate_training_memory_budget(self.config)
+
+    def test_activation_offload_api_is_checked_without_executing_it(self):
+        def enable_activation_offloading(model, strategy, enable_ckpt=False):
+            raise AssertionError("API preflight must not create a model or device streams")
+
+        fake_module = types.SimpleNamespace(enable_activation_offloading=enable_activation_offloading)
+        for checkpointing in (True, False):
+            with self.subTest(checkpointing=checkpointing):
+                self.config.actor_rollout_ref.model.enable_gradient_checkpointing = checkpointing
+                with mock.patch.object(runtime.importlib, "import_module", return_value=fake_module) as importer:
+                    runtime.validate_activation_offload_api(self.config)
+                importer.assert_called_once_with("verl.utils.activation_offload")
+        self.assertIn("activation-offload API preflight passed", self.stdout.getvalue())
+
+    def test_activation_offload_missing_module_or_function_fails_before_training(self):
+        with mock.patch.object(runtime.importlib, "import_module", side_effect=ImportError("missing module")):
+            with self.assertRaisesRegex(SystemExit, "activation-offload API"):
+                runtime.validate_activation_offload_api(self.config)
+        with mock.patch.object(runtime.importlib, "import_module", return_value=types.SimpleNamespace()):
+            with self.assertRaisesRegex(SystemExit, "activation-offload API"):
+                runtime.validate_activation_offload_api(self.config)
+
+    def test_activation_offload_incompatible_signature_is_rejected(self):
+        def missing_checkpointing_keyword(model, strategy):
+            raise AssertionError("preflight must only inspect this callable")
+
+        def extra_required_argument(model, strategy, other, enable_ckpt=False):
+            raise AssertionError("preflight must only inspect this callable")
+
+        for function in (missing_checkpointing_keyword, extra_required_argument):
+            with self.subTest(signature=function.__name__):
+                fake_module = types.SimpleNamespace(enable_activation_offloading=function)
+                with mock.patch.object(runtime.importlib, "import_module", return_value=fake_module):
+                    with self.assertRaisesRegex(SystemExit, "activation-offload API"):
+                        runtime.validate_activation_offload_api(self.config)
+
+    def test_disabled_activation_offload_does_not_import_vendor_module(self):
+        self.config.actor_rollout_ref.model.enable_activation_offload = False
+        with mock.patch.object(runtime.importlib, "import_module") as importer:
+            runtime.validate_activation_offload_api(self.config)
+        importer.assert_not_called()
+
     def test_rollout_tensor_parallelism_must_divide_available_cards(self):
         self.config.actor_rollout_ref.rollout.tensor_model_parallel_size = 3
         with self.assertRaisesRegex(SystemExit, "tensor parallel size must divide"):
@@ -337,8 +430,14 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         self.assertEqual((model.lora_rank, model.lora_alpha), (16, 32))
         self.assertAlmostEqual(actor.optim.lr, 1e-6)
         self.assertEqual((self.config.data.train_batch_size, rollout.n), (2, 4))
+        self.assertEqual((actor.ppo_mini_batch_size, actor.ppo_micro_batch_size_per_gpu), (2, 1))
+        self.assertEqual(self.config.data.max_prompt_length, 4096)
+        self.assertEqual(self.config.data.max_response_length, 20480)
         self.assertEqual(self.config.data.max_prompt_length + self.config.data.max_response_length, 24576)
         self.assertEqual(rollout.max_model_len, 24576)
+        self.assertEqual((rollout.temperature, rollout.top_p), (0.7, 0.9))
+        self.assertEqual(actor.fsdp_config.model_dtype, "bfloat16")
+        self.assertEqual(rollout.dtype, "bfloat16")
         self.assertEqual(self.config.algorithm.adv_estimator, "grpo")
         self.assertTrue(self.config.shopping_dynamic_sampling.enable)
 

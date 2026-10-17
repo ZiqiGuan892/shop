@@ -526,8 +526,16 @@ def validate_training_memory_budget(config):
     response_length = int(config.data.max_response_length)
     total_length = prompt_length + response_length
     actor = config.actor_rollout_ref.actor
+    model = config.actor_rollout_ref.model
     rollout = config.actor_rollout_ref.rollout
     reference = config.actor_rollout_ref.ref
+
+    calculate_entropy = bool(actor.get("calculate_entropy", True))
+    entropy_coeff = float(actor.get("entropy_coeff", 0.0))
+    if not math.isfinite(entropy_coeff):
+        raise SystemExit("actor.entropy_coeff must be finite")
+    if entropy_coeff != 0.0 and not calculate_entropy:
+        raise SystemExit("nonzero entropy_coeff requires actor.calculate_entropy=true")
 
     if response_length > MAX_SAFE_RESPONSE_LENGTH:
         raise SystemExit(
@@ -592,10 +600,38 @@ def validate_training_memory_budget(config):
                 "rollout_log_prob_dynamic_batch": False,
                 "reference_micro_batch_size_per_gpu": 1,
                 "reference_dynamic_batch": False,
+                "actor_calculate_entropy": calculate_entropy,
+                "actor_entropy_coeff": entropy_coeff,
+                "actor_activation_offload": bool(model.get("enable_activation_offload", False)),
+                "actor_gradient_checkpointing": bool(model.get("enable_gradient_checkpointing", False)),
+                "actor_reshard_after_forward": bool(actor.fsdp_config.get("reshard_after_forward", True)),
+                "actor_forward_prefetch": bool(actor.fsdp_config.get("forward_prefetch", False)),
             },
             sort_keys=True,
         )
     )
+
+
+def validate_activation_offload_api(config):
+    """Check the selected vendor API without creating a model or device streams."""
+    model = config.actor_rollout_ref.model
+    if not bool(model.get("enable_activation_offload", False)):
+        return
+    try:
+        module = importlib.import_module("verl.utils.activation_offload")
+        inspect.signature(module.enable_activation_offloading).bind(
+            None,
+            str(config.actor_rollout_ref.actor.strategy),
+            enable_ckpt=bool(model.get("enable_gradient_checkpointing", False)),
+        )
+    except (ImportError, AttributeError, TypeError, ValueError) as exc:
+        raise SystemExit(
+            "selected veRL fork lacks the required activation-offload API: " + str(exc)
+        ) from exc
+    print("GRPO activation-offload API preflight passed: " + json.dumps({
+        "strategy": str(config.actor_rollout_ref.actor.strategy),
+        "gradient_checkpointing": bool(model.get("enable_gradient_checkpointing", False)),
+    }, sort_keys=True))
 
 
 def main():
@@ -619,6 +655,7 @@ def main():
         raise SystemExit("missing GRPO parquet file(s): " + ", ".join(missing))
     validate_data_isolation(config)
     validate_training_memory_budget(config)
+    validate_activation_offload_api(config)
     validate_trace(config)
 
     try:

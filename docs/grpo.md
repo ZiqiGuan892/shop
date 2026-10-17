@@ -273,7 +273,8 @@ SFT policy; they have not been validated by a training run on your server.
 | Maximum training steps / epochs | 500 / 50 |
 | Save / validation frequency | 50 / 50; validation before training enabled |
 | KL reward / KL loss | disabled / disabled |
-| Policy entropy measurement | enabled for logging; entropy coefficient 0 |
+| Policy entropy measurement | disabled; entropy coefficient remains 0 |
+| Actor activation memory | native veRL activation offload + gradient checkpointing |
 | Dynamic sampling | enabled; at most 3 generation batches and 10 consecutive skipped updates |
 
 The prompt batch is global: 8 devices do not multiply it by another factor of
@@ -298,7 +299,38 @@ Actor and rollout parallelism serve different phases: FSDP shards the actor
 across 8 devices, while TP=2 distributes a rollout model across each pair.
 
 For memory and NPU runtime behavior, actor parameter/optimizer offload and
-gradient checkpointing remain enabled. The rollout memory utilization is 0.45,
+gradient checkpointing remain enabled, and **activation offload is enabled**.
+veRL moves saved layer activations to host memory and restores them for backward;
+when combined with checkpointing, its offload implementation supplies the
+checkpoint wrapper. This adds host-memory and transfer costs and can reduce
+training throughput. The native implementation skips offload with a warning
+if it finds fewer than three wrapped layers; inspect that warning if changing
+the model's FSDP wrapping policy. FSDP explicitly reshards parameters after forward and
+leaves forward prefetch disabled. Parameter/optimizer offload alone does not
+eliminate saved activations or the loss's full-vocabulary intermediate tensors.
+See [veRL activation offload](https://github.com/volcengine/verl/blob/main/verl/utils/activation_offload.py).
+
+`actor.calculate_entropy=false` removes the entropy statistic and its graph.
+The entropy coefficient was already zero, so this preserves the mathematical
+GRPO objective. With entropy enabled, the native loss can still execute
+`policy_loss -= 0 * entropy_loss` and backpropagate through the large vocabulary
+softmax; a zero coefficient does not prune that graph. The `actor/entropy_loss`
+metric is consequently absent. Preflight requires nonzero entropy-coefficient
+overrides to explicitly enable entropy calculation as well, making their
+additional memory cost visible in the launch configuration. See
+[veRL policy loss](https://github.com/volcengine/verl/blob/main/verl/workers/utils/losses.py).
+
+These settings target actor forward/backward memory while preserving prompt,
+response and total sequence limits, rollout count, learning rate, clipping,
+LoRA rank and effective batch. Per-device micro batch is already one; lowering
+token limits used only for dynamic batching would not split that single long
+trajectory in this static-batch recipe. Preflight prints the selected entropy,
+activation-offload, checkpointing and FSDP settings and verifies the native
+offload API without starting a model. It cannot certify the peak memory of a
+particular server build or trajectory; model logits and their gradients still
+require device memory.
+
+The rollout memory utilization is 0.45,
 with at most 8 sequences and eager execution enabled. Eager execution avoids
 the NPU graph-capture stream/SQ-CQ failure seen previously; it may reduce
 throughput and is not a guarantee against memory pressure. Actor
