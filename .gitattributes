@@ -5,3 +5,4 @@ environments/ShopSimulator/shop_env/shop_env/pack_api.py text eol=lf
 environments/ShopSimulator/shop_env/web_agent_site/engine/reward.py text eol=lf
 environments/ShopSimulator/shop_env/shop_env/slot_lease_pool.py text eol=lf
 environments/ShopSimulator/shop_env/web_agent_site/envs/web_agent_text_env.py text eol=lf
+integrations/verl/ray_trainer.py text eol=lf

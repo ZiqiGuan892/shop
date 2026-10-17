@@ -55,7 +55,7 @@ to Python. Switching to the Shopping directory removes that implicit search
 path. `VERL_ROOT` makes the selection explicit for preflight and training.
 
 `pip show verl` reports distribution metadata, not source importability. Both
-preflight and the dynamic-sampling patch helper read the selected package's
+preflight and the trainer installer read the selected package's
 `__version__` (or its own `version/version` file), print its source path, and
 still enforce the supported version and APIs. They do not require veRL pip
 metadata, and do not borrow version metadata from another installed checkout.
@@ -97,81 +97,73 @@ Shopping sampling and TRACE hooks target that class. This selects a trainer
 within the existing veRL installation; it does not downgrade veRL. Preflight
 still rejects an explicit `trainer.use_v1=true` override.
 
-The server's development fork may differ from that release. Selecting this
-backend only resolves the V1 configuration conflict; it does **not** verify
-the fork's worker/config APIs or port the dynamic-sampling patch. Keep that
-patch check enabled and run `bash scripts/grpo.sh --check-only` before training.
-If it reports an unreviewed or missing trainer patch, collect the actual source
-for review with the same Python and `VERL_ROOT` used by training:
-
-```bash
-PYTHONPATH="${VERL_ROOT:+$VERL_ROOT:}${PYTHONPATH:-}" "$PYTHON_BIN" - <<'PY'
-from pathlib import Path
-import tarfile
-import verl
-
-root = Path(verl.__file__).resolve().parent
-output = Path("outputs/verl-source-review.tar.gz")
-output.parent.mkdir(parents=True, exist_ok=True)
-with tarfile.open(output, "w:gz") as archive:
-    for name in (
-        "__init__.py", "version/version",
-        "trainer/main_ppo.py", "trainer/main_ppo_v0.py",
-        "trainer/ppo/ray_trainer.py", "trainer/config",
-        "workers/config", "experimental/agent_loop", "tools",
-    ):
-        path = root / name
-        if path.exists():
-            archive.add(path, arcname=f"verl/{name}")
-print(f"veRL {verl.__version__}: {root}")
-print(output.resolve())
-PY
-```
-
-This only exports source and configuration files for inspection; it does not
-start Ray, load model weights or modify the server's veRL checkout.
+The development fork may differ from that release. Selecting this backend
+resolves the V1 configuration conflict; the rest of preflight checks the
+available APIs and the directly installed trainer described below. Passing
+these checks does not establish an end-to-end NPU training result.
 
 `scripts/setup.sh` without arguments prepares the other pinned training dependencies
-and ShopSimulator. It does not install veRL or apply a trainer patch automatically,
+and ShopSimulator. It does not install veRL or replace its trainer automatically,
 and does not certify that a GRPO environment is ready. It is not needed for an
 already working training environment. If only the simulator is missing, use
 `bash scripts/setup.sh --shopsim-only`.
 
-### Dynamic-sampling patch
+### Direct trainer integration
 
-This repository does not vendor veRL. Project-owned integration code lives in
-`src/shopping_grpo/training/grpo/`. The bounded sampler requires a reviewed
-trainer integration. The existing file
-`patches/verl-0.8.0-shopping-dynamic-sampling.patch` retains its original name
-because it was produced from the 0.8 trainer source; it is **not a verified
-patch for an arbitrary 0.9.0.dev vendor fork**. The runtime version gate and
-trainer-source verification are separate checks.
+[`integrations/verl/ray_trainer.py`](../integrations/verl/ray_trainer.py) is the
+server's supplied **0.9.0.dev** trainer with Shopping dynamic sampling integrated
+directly into its training loop. Sampling helpers remain in
+`src/shopping_grpo/training/grpo/`. The former 0.8 patch file, patch application
+script and patch-marker requirement have been removed. Dynamic sampling itself
+stays enabled with the original training recipe.
 
-Use the same Python and source selection as training to check the patch:
-
-```bash
-PYTHONPATH="${VERL_ROOT:+${VERL_ROOT}:}${PYTHONPATH:-}" \
-  "$PYTHON_BIN" scripts/apply_verl_dynamic_sampling_patch.py --check
-```
-
-Only if the selected 0.9.0.dev checkout's trainer source is byte-identical to
-the reviewed original SHA-256 may the existing patch be applied by omitting
-`--check`:
+Stop any GRPO job using this veRL checkout before replacing its source. From
+the Shopping repository root, select the same Python and `VERL_ROOT` as training:
 
 ```bash
-PYTHONPATH="${VERL_ROOT:+${VERL_ROOT}:}${PYTHONPATH:-}" \
-  "$PYTHON_BIN" scripts/apply_verl_dynamic_sampling_patch.py
+export PYTHON_BIN="$(command -v python)"
+PYTHONPATH="${VERL_ROOT:+$VERL_ROOT:}${PYTHONPATH:-}" \
+  "$PYTHON_BIN" scripts/install_verl_trainer.py
 ```
 
-The script accepts source-only and editable deployments, but retains strict
-SHA-256 verification and a verified original backup. Preflight also verifies
-the patched source hash, not just a marker comment. If a server fork's
-`ray_trainer.py` differs, it must be provided for comparison and a reviewed
-patch port before the default training recipe can run. A missing marker or
-unknown hash is reported with the exact source path. Do not force installation
-over the working environment, bypass the checksum, or disable dynamic sampling
-to hide the mismatch. Accepting the development version alone does not establish
-end-to-end compatibility or a successful NPU training run.
+The installer locates `verl/trainer/ppo/ray_trainer.py` through the actual
+imported `verl` package, verifies the supplied server original and repository
+replacement hashes, and checks Python syntax without importing the training
+loop. It saves the original beside the file as
+`ray_trainer.py.shopping-grpo-trainer.orig`, then atomically replaces only
+`ray_trainer.py`. It preserves file permissions, never reinstalls packages, and
+does not start training. Repeating installation with identical content is safe.
+Hashes normalize CRLF to LF and trailing empty lines to one final newline to
+support Windows checkouts and pasted source files; other content changes are
+not ignored. The backup preserves the original bytes. Unknown source files or
+corrupted backups are rejected.
+
+Verify deployment and the complete launch configuration:
+
+```bash
+PYTHONPATH="${VERL_ROOT:+$VERL_ROOT:}${PYTHONPATH:-}" \
+  "$PYTHON_BIN" scripts/install_verl_trainer.py --check
+bash scripts/grpo.sh --check-only
+```
+
+Preflight checks the **deployed trainer content hash**, along with helper APIs,
+dynamic-sampling settings, environment, dataset isolation and device topology.
+There is no old-patch marker check to bypass. A mismatched hash means the
+selected file differs from the reviewed implementation; inspect the printed
+source path rather than disabling dynamic sampling.
+
+To undo this source replacement, stop jobs using the checkout and restore the
+verified backup with the same interpreter/source selection:
+
+```bash
+PYTHONPATH="${VERL_ROOT:+$VERL_ROOT:}${PYTHONPATH:-}" \
+  "$PYTHON_BIN" scripts/install_verl_trainer.py --restore
+```
+
+Restore refuses to overwrite unknown subsequent edits. Restoring the original
+removes this Shopping training-loop integration, so the default Shopping
+preflight will require installation again. The rest of the server's veRL
+installation is unchanged. Full NPU training still requires server validation.
 
 ## Run
 
@@ -258,6 +250,14 @@ The original learning rate, loss settings, batch sizes and sampling budgets
 above remain unchanged. Model selection, device topology and execution settings
 are adjusted for the 9B NPU run.
 
+Dynamic sampling needs fresh environment rollouts for each generation batch.
+Cached rollout replay must remain disabled: both `skip.rollout.enable` and
+`actor_rollout_ref.rollout.skip.enable` must be false when present in the selected
+veRL configuration. Replaying a cached batch under the same optimizer step
+would prevent additional sampling from supplying fresh task groups. This
+requirement does not change the rollout count, temperature, learning rate or
+other training parameters above.
+
 GRPO retains the project's **LoRA** recipe even though the preceding SFT updates
 all model parameters. Its FSDP actor is separate from the SFT Trainer's
 DeepSpeed ZeRO-3 configuration; `configs/sft_zero3.json` does not configure GRPO.
@@ -296,6 +296,9 @@ For the default `--output outputs/models/grpo`, the launcher writes:
 - `launch.json`: selected paths, interpreter and command.
 - `training_diagnostics.jsonl`: generated trajectories and optimizer metrics.
 - veRL checkpoints and Hydra artifacts beneath the same run directory.
+- Each `global_step_N/` checkpoint also contains `data.pt` and
+  `shopping_sampler_state.json` for dynamic-sampling resume, alongside the
+  actor checkpoint.
 
 Preflight prints to the console before any output files are created. A failed
 preflight leaves the output directory available for retry; a failed training
@@ -314,6 +317,32 @@ veRL metrics, including entropy, PPO KL, clip fractions, response lengths and
 effective-group rates. `skipped_update` records expose zero-signal attempts
 that do not advance the optimizer step. Data is written as those events occur;
 a preflight failure will not produce rollout records.
+
+Dynamic sampling consumes a variable number of input batches per optimizer
+update. Therefore, `global_step_N` cannot determine the actual data position.
+The directly integrated trainer saves `shopping_sampler_state.json` with its
+schema version, completed optimizer step, actual epoch, number of batches
+consumed within that epoch, dataloader length and sampler state. The companion
+`data.pt` stores the stateful dataloader state. Resume loads these files
+together to continue from the recorded cursor; it does not estimate the epoch
+or cursor from the optimizer step.
+
+To continue a checkpoint, retain its complete directory and select a new or
+empty output directory for the resumed run:
+
+```bash
+bash scripts/grpo.sh --output outputs/models/grpo-resumed -- \
+  trainer.resume_mode=resume_path \
+  trainer.resume_from_path=outputs/models/grpo/global_step_100
+```
+
+Replace `global_step_100` with the checkpoint you actually saved. Keep the
+training data and sampling configuration consistent with that run. The trainer
+rejects a missing `shopping_sampler_state.json`, missing `data.pt`, mismatched
+step/dataloader metadata or invalid cursor. Older checkpoints without the
+Shopping sampler state cannot be resumed under this integration by guessing a
+cursor or creating an empty state file. This is a format and state consistency
+check, not a promise of bitwise-identical NPU results.
 
 ## Export
 

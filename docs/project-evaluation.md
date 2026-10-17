@@ -219,11 +219,15 @@ PPO 风格 clipping 限制每次更新的变化幅度，损失采用 `token-mean
 
 当同一任务的 4 条轨迹奖励相同，组内优势为零，无法产生有效的相对学习信号。动态采样会按 prompt 分组，以 `terminal_utility` 判断奖励差异；任一轨迹被标为 `sampling_invalid` 时会丢弃整组，再尝试补足可更新 batch。它不是只保留成功轨迹，也不只是按成功与否这个布尔值筛选。
 
-`max_num_gen_batches=3` 表示一次更新尝试最多生成 **总计 3 批**，即首次生成后最多追加 2 批，不是额外补采 3 批。凑不齐 2 个有效组时跳过更新，并清空本次未凑满的组；跳过不增加 optimizer/global step，连续 10 次跳过会报错停止本次训练，避免无界重采样。项目用带版本与 SHA 校验的 veRL 小补丁接入此流程，并保存有效组比例、重采样和跳过更新等诊断。
+`max_num_gen_batches=3` 表示一次更新尝试最多生成 **总计 3 批**，即首次生成后最多追加 2 批，不是额外补采 3 批。凑不齐 2 个有效组时跳过更新，并清空本次未凑满的组；跳过不增加 optimizer/global step，连续 10 次跳过会报错停止本次训练，避免无界重采样。当前实现直接修改服务器提供的 veRL 0.9.0.dev `ray_trainer.py`，安装时备份原文件并校验源码 SHA；原 0.8 补丁及其 marker 检查已移除。有效组比例、重采样和跳过更新等诊断继续保留。
+
+动态采样依赖新生成的轨迹，因此 `skip.rollout.enable` 和 `actor_rollout_ref.rollout.skip.enable`（若所选配置中存在）必须关闭，不能在未推进 optimizer step 的补采阶段重放缓存。这不改变每题 4 条轨迹、最多 3 批补足预算或原有学习率等参数。
+
+每个新 checkpoint 中的 `shopping_sampler_state.json` 记录真实 epoch、已消费 batch 游标和采样器状态，并与 `data.pt` 中的 dataloader 状态一起恢复。动态采样的消费批次数不等于 optimizer step；旧 checkpoint 缺少这些状态时，训练器明确报错，不能靠训练步数猜测游标。安装、检查、恢复原文件和训练断点续训命令见 [GRPO 指南](grpo.md)。此源码适配不等于已经完成服务器上的 NPU 训练验证。
 
 `reward_valid=false` 或基础设施无效的轨迹需要过滤，不能把它们的零分当作有效购物偏好。动态采样能减少无信号更新，但不能凭空创造策略中不存在的探索路径。应从训练日志核对有效组比例、同题动作多样性和跳过次数，再判断 GRPO 是否真的获得足够信息。
 
-依据：[动态采样](../src/shopping_grpo/training/grpo/dynamic_sampling.py)、[veRL 补丁](../patches/verl-0.8.0-shopping-dynamic-sampling.patch)、[奖励运行时](../src/shopping_grpo/training/grpo/adapter/runtime.py)。
+依据：[动态采样](../src/shopping_grpo/training/grpo/dynamic_sampling.py)、[veRL 训练循环](../integrations/verl/ray_trainer.py)、[奖励运行时](../src/shopping_grpo/training/grpo/adapter/runtime.py)。
 
 ### 5.4 可选机制与已验证结果必须分开
 

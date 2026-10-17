@@ -108,10 +108,13 @@ GRPO 默认从完整导出的 Qwen3.5-9B SFT 模型开始。veRL 在 ShopSimulat
 四条轨迹，环境用确定性的 Reward v3 评估最终购买结果、约束满足程度和终止行为。
 训练不使用额外的 LLM-as-a-Judge Reward Model。
 
-本仓库没有复制 veRL 源码。GRPO 入口选择当前服务器的 veRL `0.9.0.dev` 源码
+GRPO 入口选择当前服务器的 veRL `0.9.0.dev` 源码
 （接受等价的 `0.9.0.dev0` 及本地构建后缀），保留项目自己的 AgentLoop、工具适配层、
 运行时 hooks 和动态采样校验。不会安装其他 veRL 版本来替换服务器环境。
-旧动态采样补丁仍须与该服务器分支的源码核对及移植，接受版本号不代表接口适配已验证。
+动态采样直接集成在基于服务器源码修改的
+[`integrations/verl/ray_trainer.py`](integrations/verl/ray_trainer.py) 中，
+通过安装脚本备份并替换所选 veRL 中的同名文件；原 0.8 补丁及 marker 检查已移除。
+预检查校验实际部署文件的内容哈希，完整 NPU 训练仍需服务器验证。
 默认单机 8 张 NPU、FSDP Actor、Rollout TP=2，
 GRPO 继续使用原有 LoRA 配方。详细配置见
 [GRPO 文档](docs/grpo.md)。
@@ -247,8 +250,9 @@ SFT 带来了主要能力提升，让模型学会合法工具调用、长程搜�
 bash scripts/setup.sh
 ```
 
-该脚本会安装固定版本的 SFT、veRL 和 vLLM 依赖，创建独立的 ShopSimulator
-环境，校验并解压商品数据，构建搜索索引，并应用经过版本和哈希检查的 veRL 补丁。
+该脚本会安装固定版本的 SFT 和 vLLM 等依赖，创建独立的 ShopSimulator
+环境，校验并解压商品数据，构建搜索索引。veRL 使用服务器已有的 0.9.0.dev
+源码；setup 不安装 veRL，也不修改其训练循环。
 
 如果已有可用的训练环境（例如已配置好的 Ascend NPU / veRL 环境），只安装
 ShopSimulator：
@@ -372,6 +376,17 @@ GRPO 会创建内部 vLLM Rollout worker，不需要单独启动模型服务。
 的顺序选择解释器。若需要指定 veRL 源码，设置 `VERL_ROOT=/path/to/verl-checkout`，
 指向包含 `verl/__init__.py` 的仓库目录。
 
+在服务器上安装已集成动态采样的训练器（仅首次安装或训练器文件更新后需要）：
+
+```bash
+export PYTHON_BIN="$(command -v python)"
+PYTHONPATH="${VERL_ROOT:+$VERL_ROOT:}${PYTHONPATH:-}" \
+  "$PYTHON_BIN" scripts/install_verl_trainer.py
+```
+
+脚本只替换实际导入的 `verl/trainer/ppo/ray_trainer.py`，自动备份已核对的服务器原版，
+拒绝覆盖其他未知修改。不会安装 veRL 或应用旧版本补丁。
+
 先打印最终命令，再进行不加载权重、不启动 Ray 或训练的预检查：
 
 ```bash
@@ -391,12 +406,21 @@ bash scripts/grpo.sh
 LoRA rank=16/alpha=32、学习率 `1e-6`、最大长度 24,576 和 500 个训练 step。
 全局一次有效更新对应 8 条轨迹，不再乘以卡数。这里的 FSDP/LoRA 与 SFT 的
 DeepSpeed ZeRO-3 全量微调分别配置。单机 veRL 仍需要 Ray，但不会等待第二个节点。
+动态采样要求每批生成新轨迹，`skip.rollout.enable` 和
+`actor_rollout_ref.rollout.skip.enable`（若所选 veRL 配置中存在）必须关闭，
+避免同一个 optimizer step 内重放缓存轨迹。其余训练参数保持上述设置。
 
-项目的动态采样补丁仍必须通过校验。若服务器分支源码哈希不匹配，先按
-[GRPO 指南](docs/grpo.md)检查和移植补丁，不要覆盖安装已有环境或静默关闭动态采样。
+项目的动态采样训练器仍必须通过内容哈希校验。若服务器分支源码哈希不匹配，先按
+[GRPO 指南](docs/grpo.md)核对实际文件，不要强制覆盖未知修改或静默关闭动态采样。
 控制台日志写入 `outputs/models/grpo/train.log`，同时保留 `launch.json` 和
 `training_diagnostics.jsonl`。输出目录必须新建或为空；保留旧产物时使用
 `--output outputs/models/grpo-9b`，后续导出路径也相应修改。
+
+每个动态采样 checkpoint 除 actor 状态外，还保存 `data.pt` 和
+`shopping_sampler_state.json`。后者记录真实 epoch、该 epoch 已消费的 batch 游标
+及采样器状态，与 dataloader 状态配合断点恢复；不能根据 optimizer step 推算数据位置。
+旧 checkpoint 缺少这些状态时会明确报错，不猜测恢复。续训需指定完整 checkpoint
+和新输出目录，命令见 [GRPO 日志与断点恢复](docs/grpo.md#logs-and-checkpoints)。
 
 根据验证集指标选择 Checkpoint，并导出 veRL Actor：
 

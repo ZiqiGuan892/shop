@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import importlib
 import importlib.util
 import inspect
@@ -16,7 +15,7 @@ from pathlib import Path
 
 
 REQUIRED_PACKAGES = ("verl", "vllm", "torch", "transformers", "ray", "tensordict", "numpy", "peft", "pyarrow")
-from shopping_grpo.training.grpo.patch_contract import EXPECTED_PATCHED_SHA256, PATCH_MARKER
+from shopping_grpo.training.grpo.trainer_contract import EXPECTED_TRAINER_SHA256, normalized_sha256
 MAX_SAFE_RESPONSE_LENGTH = 20480
 MAX_SAFE_SEQUENCE_LENGTH = 24576
 CURRENT_RUNTIME_FILES = {
@@ -266,20 +265,13 @@ def validate_dynamic_sampling(config, verl_source: Path, installed):
     ray_trainer = verl_source.parent / "trainer" / "ppo" / "ray_trainer.py"
     if not ray_trainer.is_file():
         raise SystemExit(f"cannot locate installed RayPPOTrainer source: {ray_trainer}")
-    if PATCH_MARKER not in ray_trainer.read_text(encoding="utf-8"):
+    trainer_hash = normalized_sha256(ray_trainer)
+    if trainer_hash != EXPECTED_TRAINER_SHA256:
         raise SystemExit(
-            "shopping dynamic sampling is enabled but the reviewed patch marker is missing; "
-            f"selected veRL={installed.get('verl')}, source={ray_trainer}. "
-            "The bundled patch was reviewed against an earlier trainer source; a 0.9.0.dev vendor "
-            "fork requires a source comparison and patch port before training. Provide this "
-            "ray_trainer.py for review; do not force the patch or silently disable dynamic sampling."
-        )
-    trainer_hash = hashlib.sha256(ray_trainer.read_bytes()).hexdigest()
-    if trainer_hash != EXPECTED_PATCHED_SHA256:
-        raise SystemExit(
-            "shopping dynamic-sampling patch marker is present but trainer source is unreviewed: "
+            "shopping dynamic sampling requires the reviewed server trainer: "
             f"{ray_trainer}, sha256={trainer_hash}. "
-            "A version string or marker alone does not verify the 0.9.0.dev patch port."
+            "Run scripts/install_verl_trainer.py with the same Python and veRL source selection, "
+            "then rerun bash scripts/grpo.sh --check-only. The old 0.8 patch is no longer used."
         )
 
     try:
@@ -328,6 +320,12 @@ def validate_dynamic_sampling(config, verl_source: Path, installed):
         raise SystemExit("shopping dynamic sampling requires rollout_correction.bypass_mode=true")
     if not bool(config.actor_rollout_ref.rollout.get("calculate_log_probs", False)):
         raise SystemExit("shopping dynamic sampling requires rollout.calculate_log_probs=true")
+    from shopping_grpo.training.grpo.sampling_loop import validate_sampling_modes
+
+    try:
+        validate_sampling_modes(config)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     print(
         "shopping dynamic sampling preflight passed: "
@@ -341,7 +339,7 @@ def validate_dynamic_sampling(config, verl_source: Path, installed):
                 ),
                 "reward_tolerance": reward_tolerance,
                 "ray_trainer": str(ray_trainer),
-                "marker": PATCH_MARKER,
+                "trainer_sha256": trainer_hash,
             },
             sort_keys=True,
         )
