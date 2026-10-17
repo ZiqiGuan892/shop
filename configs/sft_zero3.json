@@ -1,0 +1,22 @@
+{
+  "bf16": { "enabled": "auto" },
+  "fp16": { "enabled": "auto" },
+  "train_micro_batch_size_per_gpu": "auto",
+  "train_batch_size": "auto",
+  "gradient_accumulation_steps": "auto",
+  "gradient_clipping": "auto",
+  "zero_optimization": {
+    "stage": 3,
+    "contiguous_gradients": true,
+    "reduce_scatter": true,
+    "overlap_comm": false,
+    "reduce_bucket_size": 5000000,
+    "stage3_prefetch_bucket_size": 0,
+    "stage3_param_persistence_threshold": 10000,
+    "stage3_model_persistence_threshold": 1000000,
+    "stage3_max_live_parameters": 50000000,
+    "stage3_max_reuse_distance": 0,
+    "sub_group_size": 50000000,
+    "stage3_gather_16bit_weights_on_model_save": true
+  }
+}

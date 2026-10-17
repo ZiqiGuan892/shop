@@ -222,7 +222,7 @@ SFT 带来了主要能力提升，让模型学会合法工具调用、长程搜�
 - NVIDIA GPU 和兼容的 CUDA Driver；
 - [`uv`](https://docs.astral.sh/uv/)；
 - 大约 25 GB 可用磁盘空间，用于依赖、模型权重和运行产物；
-- 历史 LoRA SFT 配方以 48 GB 显存为设计目标；当前默认 9B 全量 SFT 使用 8 卡 ZeRO-2，容量需实测；
+- 历史 LoRA SFT 配方以 48 GB 显存为设计目标；当前默认 9B 全量 SFT 使用 8 卡 ZeRO-3，容量需实测；
 - GRPO 配置按照单张 96 GB GPU 验证。
 
 主训练环境使用 Python 3.12，ShopSimulator 使用隔离的 Python 3.10 环境。
@@ -327,13 +327,19 @@ bash scripts/serve_model.sh outputs/models/sft-full
 bash scripts/evaluate.sh sft
 ```
 
-默认使用单机 8 卡数据并行 + ZeRO-2（DP=8、TP=1），加载
-`configs/sft_zero2.json`，启用 BF16、每卡 batch=1 和 gradient checkpointing。
-有效全局 batch 为 `每卡 1 × 8 卡 × 累积 8 = 64`。ZeRO-2 分片梯度与优化器状态，
-各卡仍保留完整参数；不量化、不开启 offload，不保证 9B 长序列一定能在指定显存内运行。
-`--deepspeed 配置.json` 可覆盖默认分片配置。ZeRO-2 本身不降低数值精度，
-但速度可能变快或变慢，浮点归约等差异也意味着不能保证最终成绩完全相同。
+默认使用单机 8 卡数据并行 + ZeRO-3（DP=8、TP=1），加载
+`configs/sft_zero3.json`，启用 BF16、每卡 batch=1 和 gradient checkpointing。
+有效全局 batch 为 `每卡 1 × 8 卡 × 累积 8 = 64`，最大长度保持 24,576。
+ZeRO-3 分片参数、梯度与优化器状态；关闭通信重叠和预取、减小通信桶并限制参数缓存，
+以降低峰值显存，可能增加通信等待。不量化、不开启 offload 或默认 Liger；这些设置
+不是显存硬上限，仍可能遇到长序列激活或 logits 的峰值。
+`--deepspeed 配置.json` 可覆盖默认配置，`configs/sft_zero2.json` 保留为显式选项。
+分片本身不降低数值精度，但浮点归约等差异意味着不能保证最终成绩完全相同。
 详见 [SFT 指南](docs/sft.md)。已有 LoRA 评测分数不代表新全量方案效果。
+
+切换 ZeRO-2 → ZeRO-3 不应直接恢复旧 ZeRO-2 优化器 checkpoint。
+从基模重新开始时，可使用 `SFT_OUTPUT_DIR=outputs/models/sft-full-zero3` 保留旧产物；
+从完整导出的模型继续训练则用 `BASE_MODEL` 指定，它会重新建立优化器，不等价于断点恢复。
 
 如果要使用[重新采样清洗](docs/data-collection.md)后的数据，显式设置：
 
@@ -445,7 +451,7 @@ tests/                           核心单元、入口和 Wheel 安装检查
 | `SFT_TRAIN_FILE` | `data/sft/train.jsonl` |
 | `SFT_VALIDATION_FILE` | `data/sft/validation.jsonl` |
 | `SFT_OUTPUT_DIR` | `outputs/models/sft-full` |
-| `SFT_NPROC_PER_NODE` | `8`（单机数据并行 + ZeRO-2，TP=1） |
+| `SFT_NPROC_PER_NODE` | `8`（单机数据并行 + ZeRO-3，TP=1） |
 
 GRPO 的高级 Hydra 参数可以追加在 `--` 后：
 

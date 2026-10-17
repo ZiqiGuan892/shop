@@ -193,7 +193,7 @@ wc -l outputs/sft-collection/clean/{train,validation}.jsonl
 ```
 
 `scripts/sft.sh` 默认使用仓库 `data/sft/` 下的现成数据。要使用本次新采样并清洗的
-数据，需要显式指定；脚本复用当前 Python，默认进行 8 卡 ZeRO-2 全量微调：
+数据，需要显式指定；脚本复用当前 Python，默认进行 8 卡 ZeRO-3 全量微调：
 
 ```bash
 SFT_TRAIN_FILE=outputs/sft-collection/clean/train.jsonl \

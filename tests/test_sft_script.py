@@ -29,10 +29,10 @@ class SFTScriptTest(unittest.TestCase):
                 self.root / "scripts" / name,
                 (ROOT / "scripts" / name).read_text(encoding="utf-8"),
             )
-        self.deepspeed_config = self.root / "configs/sft_zero2.json"
+        self.deepspeed_config = self.root / "configs/sft_zero3.json"
         self.write(
             self.deepspeed_config,
-            (ROOT / "configs/sft_zero2.json").read_text(encoding="utf-8"),
+            (ROOT / "configs/sft_zero3.json").read_text(encoding="utf-8"),
         )
         self.train = self.root / "data/sft/train.jsonl"
         self.validation = self.root / "data/sft/validation.jsonl"
@@ -85,7 +85,7 @@ exec bash "$@"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return self.record.read_text(encoding="utf-8")
 
-    def test_default_uses_repository_data_zero2_full_training_and_current_environment(self):
+    def test_default_uses_repository_data_zero3_full_training_and_current_environment(self):
         self.python("fake-bin/python", "current")
         self.python(".venv/bin/python", "repo")
         result = self.run_script(PYTHONPATH="/existing/imports")
@@ -104,9 +104,9 @@ exec bash "$@"
         self.assertIn("arg=<--per-device-eval-batch-size>\narg=<1>", text)
         self.assertIn("arg=<--gradient-checkpointing>", text)
         self.assertEqual(text.count("arg=<--deepspeed>\n"), 1)
-        self.assertIn("/configs/sft_zero2.json>", text)
+        self.assertIn("/configs/sft_zero3.json>", text)
         self.assertIn("DeepSpeed config:", result.stderr)
-        self.assertIn("/configs/sft_zero2.json", result.stderr)
+        self.assertIn("/configs/sft_zero3.json", result.stderr)
         self.assertIn("/src:/existing/imports\n", text)
         self.assertNotIn("merge_lora", text)
         self.assertIn("arg=<-m>\narg=<torch.distributed.run>", text)
@@ -114,6 +114,19 @@ exec bash "$@"
         self.assertIn("arg=<--nnodes=1>", text)
         self.assertIn("arg=<--nproc-per-node>\narg=<8>", text)
         self.assertIn("nodes: 1; processes: 8;", result.stderr)
+
+        # Check the resolved training recipe, including values inherited from
+        # the Python entry point rather than repeated by the shell launcher.
+        from scripts import train_sft
+
+        command = [line[5:-1] for line in text.splitlines() if line.startswith("arg=<")]
+        args = train_sft.parse_args(command[command.index("scripts/train_sft.py") + 1:])
+        self.assertEqual(args.max_length, 24576)
+        self.assertEqual(args.gradient_accumulation_steps, 8)
+        self.assertEqual(args.per_device_train_batch_size * args.gradient_accumulation_steps * 8, 64)
+        self.assertEqual(args.dtype, "bf16")
+        self.assertTrue(args.gradient_checkpointing)
+        self.assertFalse(args.qlora)
 
     def test_model_root_override_keeps_default_9b_name(self):
         self.python("fake-bin/python", "current")
@@ -197,7 +210,7 @@ exec bash "$@"
     def test_deepspeed_override_preserves_spaces_and_only_passes_final_config(self):
         self.python("fake-bin/python", "current")
         config = self.root / "prepared configs/zero2.json"
-        self.write(config, self.deepspeed_config.read_text(encoding="utf-8"))
+        self.write(config, (ROOT / "configs/sft_zero2.json").read_text(encoding="utf-8"))
         for arguments in (
             ("--deepspeed", config.as_posix()),
             (f"--deepspeed={config.as_posix()}",),
@@ -208,7 +221,7 @@ exec bash "$@"
                 text = self.recorded(result)
                 self.assertEqual(text.count("arg=<--deepspeed>\n"), 1)
                 self.assertIn("/prepared configs/zero2.json>", text)
-                self.assertNotIn("/configs/sft_zero2.json>", text)
+                self.assertNotIn("/configs/sft_zero3.json>", text)
                 self.assertNotIn("/unused/config.json>", text)
                 self.assertIn("DeepSpeed config:", result.stderr)
                 self.assertIn("/prepared configs/zero2.json", result.stderr)
@@ -292,7 +305,7 @@ exec bash "$@"
         self.deepspeed_config.unlink()
         result = self.run_script("--help", BASE_MODEL="/missing/model")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Default: 8 (single-node data parallelism + ZeRO-2)", result.stdout)
+        self.assertIn("Default: 8 (single-node data parallelism + ZeRO-3)", result.stdout)
         if self.record.exists():
             self.assertIn("arg=<--help>", self.record.read_text(encoding="utf-8"))
 

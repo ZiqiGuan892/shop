@@ -211,6 +211,11 @@ def _prepare_model_for_training(model, args, prepare_model_for_kbit_training):
         )
     if args.gradient_checkpointing:
         model.config.use_cache = False
+        # Qwen3.5 reads the decoder cache setting from its nested text config.
+        # Setting only the multimodal wrapper leaves that setting enabled.
+        text_config = getattr(model.config, "text_config", None)
+        if text_config is not None:
+            text_config.use_cache = False
         if (args.finetuning_type == "lora" and not args.qlora
                 and hasattr(model, "enable_input_require_grads")):
             model.enable_input_require_grads()

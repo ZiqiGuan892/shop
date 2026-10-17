@@ -119,7 +119,7 @@ Pure V4 文件有 1,192 行、1,192 个唯一 task ID。元数据记载合并时
 
 ### 4.1 学习目标和监督范围
 
-当前主入口 `scripts/sft.sh` 使用 Transformers Trainer + PyTorch/Accelerate 和 DeepSpeed ZeRO-2，默认读取仓库 `data/sft/` 下的 800 条训练、200 条验证轨迹，对 Qwen3.5-9B 进行全量微调，直接保存到 `outputs/models/sft-full`。可选 LoRA 模式才使用 PEFT；本节保留的 LoRA 配置和已有结果不代表新全量方案的实测效果。一个样本是完整多轮轨迹，包含 system、user、assistant 和 tool 消息，通过目标模型的 chat template 渲染。标签先全部设置为 `-100`，再打开 Assistant 回合对应的 token：
+当前主入口 `scripts/sft.sh` 使用 Transformers Trainer + PyTorch/Accelerate 和 DeepSpeed ZeRO-3，默认读取仓库 `data/sft/` 下的 800 条训练、200 条验证轨迹，对 Qwen3.5-9B 进行全量微调，直接保存到 `outputs/models/sft-full`。可选 LoRA 模式才使用 PEFT；本节保留的 LoRA 配置和已有结果不代表新全量方案的实测效果。一个样本是完整多轮轨迹，包含 system、user、assistant 和 tool 消息，通过目标模型的 chat template 渲染。标签先全部设置为 `-100`，再打开 Assistant 回合对应的 token：
 
 ```text
 SFT loss = Assistant 受监督 token 的负对数似然
@@ -132,7 +132,7 @@ system / user / tool observation 的标签 = -100
 
 ### 4.2 全量入口与 LoRA 对照参数
 
-主入口默认全量学习率 `2e-5`，3 个 epoch，使用当前 Python、BF16、单机 8 卡 ZeRO-2（DP=8、TP=1）、每卡 batch=1 和梯度累积 8，有效全局 batch 为 64。默认数据为 `data/sft/train.jsonl` 和 `data/sft/validation.jsonl`，也可通过 `SFT_TRAIN_FILE`、`SFT_VALIDATION_FILE` 选择新采样清洗的数据。全量分支不导入 PEFT、不注入 adapter、不调用合并脚本，启动时报告可训练参数数量；其余主要序列/批量设置见 [SFT 指南](sft.md)。当前 ZeRO-2 配置仅完成离线验证，没有 9B NPU 实测成绩。以下表格描述显式 `--finetuning-type lora` 的对照配置。
+主入口默认全量学习率 `2e-5`，3 个 epoch，使用当前 Python、BF16、单机 8 卡 ZeRO-3（DP=8、TP=1）、每卡 batch=1 和梯度累积 8，有效全局 batch 为 64，最大长度保持 24,576。默认数据为 `data/sft/train.jsonl` 和 `data/sft/validation.jsonl`，也可通过 `SFT_TRAIN_FILE`、`SFT_VALIDATION_FILE` 选择新采样清洗的数据。全量分支不导入 PEFT、不注入 adapter、不调用合并脚本，启动时报告可训练参数数量。默认 ZeRO-3 分片参数、梯度和优化器状态，关闭通信重叠与预取并限制参数缓存，以减少峰值占用；不启用量化或 offload，仍可能受到长序列激活、logits 峰值限制。其余配置及切换分片阶段时的恢复限制见 [SFT 指南](sft.md)。当前 ZeRO-3 默认仅完成离线检查，没有 9B NPU 实测成绩。以下表格描述显式 `--finetuning-type lora` 的对照配置。
 
 LoRA 将可训练更新限制在低秩适配参数中，避免更新所有基座权重。SFT 目标层不仅包括常见注意力投影和 MLP，还包含 Qwen3.5 Gated DeltaNet 的 `in_proj_qkv`、`in_proj_z`、`in_proj_b`、`in_proj_a`、`out_proj` 等投影，防止只覆盖部分文本层。
 

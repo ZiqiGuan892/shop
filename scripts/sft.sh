@@ -13,11 +13,12 @@ BASE_MODEL           Local model directory or Hugging Face model ID
 SFT_TRAIN_FILE       Default: data/sft/train.jsonl (checked-in cleaned data)
 SFT_VALIDATION_FILE  Default: data/sft/validation.jsonl
 SFT_OUTPUT_DIR       Default: outputs/models/sft-full (complete model; no merge)
-SFT_NPROC_PER_NODE   Default: 8 (single-node data parallelism + ZeRO-2)
+SFT_NPROC_PER_NODE   Default: 8 (single-node data parallelism + ZeRO-3)
 
 Defaults: BF16, batch size 1 per device, gradient checkpointing, TP=1.
-DeepSpeed shards gradients and optimizer states; model parameters stay replicated.
-Default DeepSpeed config: configs/sft_zero2.json (no offload or quantization).
+DeepSpeed shards parameters, gradients and optimizer states to reduce peak memory.
+Default DeepSpeed config: configs/sft_zero3.json (no offload or quantization).
+Sequence length and effective global batch are unchanged (24,576 and 64).
 
 Extra options go to scripts/train_sft.py, e.g. --learning-rate 2e-5,
 --epochs 3, --resume-from-checkpoint PATH, --deepspeed CONFIG.json.
@@ -26,7 +27,7 @@ HELP
   exit 0
 fi
 
-DEEPSPEED_CONFIG="$ROOT/configs/sft_zero2.json"
+DEEPSPEED_CONFIG="$ROOT/configs/sft_zero3.json"
 training_options=()
 while (( $# > 0 )); do
   case "$1" in

@@ -75,6 +75,24 @@ class FullSftTests(unittest.TestCase):
         self.assertTrue(kwargs["bf16"])
         self.assertNotIn("deepspeed", kwargs)
 
+    def test_gradient_checkpointing_disables_wrapper_and_decoder_cache(self):
+        for checkpointing in (False, True):
+            for nested_text_config in (False, True):
+                with self.subTest(checkpointing=checkpointing, nested=nested_text_config):
+                    model = Model()
+                    if nested_text_config:
+                        model.config.text_config = SimpleNamespace(use_cache=True)
+                    args = self.args(*(["--gradient-checkpointing"] if checkpointing else []))
+                    forbidden = MagicMock(side_effect=AssertionError("PEFT must not be called"))
+                    prepared = train_sft._prepare_model_for_training(model, args, forbidden)
+                    self.assertIs(prepared, model)
+                    self.assertIs(model.config.use_cache, not checkpointing)
+                    if nested_text_config:
+                        self.assertIs(model.config.text_config.use_cache, not checkpointing)
+                    else:
+                        self.assertFalse(hasattr(model.config, "text_config"))
+                    forbidden.assert_not_called()
+
     def test_npu_is_bound_before_dtype_detection_and_full_never_imports_peft(self):
         calls = []
 
@@ -137,7 +155,7 @@ class FullSftTests(unittest.TestCase):
             args = self.args("--deepspeed", str(path))
             self.assertEqual(train_sft._training_argument_kwargs(args, "bf16", True, True)["deepspeed"], str(path))
 
-    def test_default_zero2_config_uses_trainer_precision_batch_and_optimizer(self):
+    def test_optional_zero2_config_uses_trainer_precision_batch_and_optimizer(self):
         path = Path(__file__).resolve().parents[1] / "configs/sft_zero2.json"
         train_sft._validate_deepspeed_config(path)
         config = json.loads(path.read_text(encoding="utf-8"))
@@ -163,6 +181,46 @@ class FullSftTests(unittest.TestCase):
         self.assertFalse(kwargs["fp16"])
         self.assertEqual(kwargs["gradient_checkpointing_kwargs"], {"use_reentrant": False})
 
+    def test_default_zero3_limits_resident_parameters_without_changing_training_recipe(self):
+        path = Path(__file__).resolve().parents[1] / "configs/sft_zero3.json"
+        train_sft._validate_deepspeed_config(path)
+        config = json.loads(path.read_text(encoding="utf-8"))
+        zero = config["zero_optimization"]
+        self.assertEqual(zero["stage"], 3)
+        self.assertTrue(zero["stage3_gather_16bit_weights_on_model_save"])
+        self.assertFalse(zero["overlap_comm"])
+        self.assertTrue(zero["contiguous_gradients"])
+        self.assertTrue(zero["reduce_scatter"])
+        self.assertEqual(zero["reduce_bucket_size"], 5_000_000)
+        self.assertEqual(zero["stage3_prefetch_bucket_size"], 0)
+        self.assertEqual(zero["stage3_max_live_parameters"], 50_000_000)
+        self.assertEqual(zero["stage3_max_reuse_distance"], 0)
+        self.assertEqual(zero["stage3_param_persistence_threshold"], 10_000)
+        self.assertEqual(zero["stage3_model_persistence_threshold"], 1_000_000)
+        self.assertEqual(zero["sub_group_size"], 50_000_000)
+        self.assertFalse(any("offload" in key or "quant" in key for key in zero))
+        for key in ("train_micro_batch_size_per_gpu", "train_batch_size",
+                    "gradient_accumulation_steps", "gradient_clipping"):
+            self.assertEqual(config[key], "auto")
+        for key in ("bf16", "fp16"):
+            self.assertEqual(config[key]["enabled"], "auto")
+        self.assertNotIn("optimizer", config)
+        self.assertNotIn("scheduler", config)
+        args = self.args("--deepspeed", str(path), "--dtype", "bf16", "--gradient-checkpointing")
+        kwargs = train_sft._training_argument_kwargs(args, "bf16", True, True)
+        self.assertEqual(args.max_length, 24576)
+        self.assertFalse(args.qlora)
+        self.assertEqual(kwargs["deepspeed"], str(path))
+        self.assertEqual(kwargs["optim"], "adamw_torch")
+        self.assertEqual(kwargs["learning_rate"], 2e-5)
+        self.assertEqual(kwargs["per_device_train_batch_size"], 1)
+        self.assertEqual(kwargs["per_device_eval_batch_size"], 1)
+        self.assertEqual(kwargs["gradient_accumulation_steps"], 8)
+        self.assertTrue(kwargs["bf16"])
+        self.assertFalse(kwargs["fp16"])
+        self.assertTrue(kwargs["gradient_checkpointing"])
+        self.assertEqual(kwargs["gradient_checkpointing_kwargs"], {"use_reentrant": False})
+
     def test_trainer_exports_full_model_and_only_rank_zero_writes_processor_and_summary(self):
         for rank in (0, 1):
             with self.subTest(rank=rank), tempfile.TemporaryDirectory() as tmp:
@@ -176,6 +234,8 @@ class FullSftTests(unittest.TestCase):
                 order = []
 
                 def training_arguments(**kwargs):
+                    self.assertEqual(kwargs["deepspeed"], str(deepspeed_config))
+                    self.assertTrue(kwargs["bf16"])
                     order.append("training_args")
                     return SimpleNamespace(**kwargs, process_index=rank)
 
@@ -192,8 +252,11 @@ class FullSftTests(unittest.TestCase):
                 trainer_class = MagicMock(return_value=trainer)
                 deps = (torch, None, None, None, None, None, model_class, model_class,
                         None, None, None, object, object, training_arguments)
+                deepspeed_config = Path(__file__).resolve().parents[1] / "configs/sft_zero3.json"
                 with patch.object(sys, "argv", ["train_sft.py", "--model", "test-model",
-                                               "--train", "unused", "--output", str(output)]), \
+                                               "--train", "unused", "--output", str(output),
+                                               "--deepspeed", str(deepspeed_config), "--dtype", "bf16",
+                                               "--gradient-checkpointing"]), \
                         patch("scripts.train_sft._validate_sft_splits"), \
                         patch("scripts.train_sft.guard_blind_final"), \
                         patch("scripts.train_sft._training_dependencies", return_value=deps) as dependency_loader, \

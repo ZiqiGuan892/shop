@@ -60,8 +60,8 @@ SFT_OUTPUT_DIR=outputs/models/sft-full \
 | 优化器 | PyTorch AdamW |
 | Gradient checkpointing | 开启，full 使用 `use_reentrant=false` |
 | Attention | SDPA |
-| 并行方式 | 单机 8 卡数据并行 + DeepSpeed ZeRO-2，DP=8、TP=1 |
-| DeepSpeed 配置 | `configs/sft_zero2.json`；不做 CPU/NVMe offload |
+| 并行方式 | 单机 8 卡数据并行 + DeepSpeed ZeRO-3，DP=8、TP=1 |
+| DeepSpeed 配置 | `configs/sft_zero3.json`；不做 CPU/NVMe offload |
 | 有效全局 batch | `每卡 1 × 8 卡 × 梯度累积 8 = 64` |
 | 保存与验证 | 每个 epoch；最多保留 3 个 checkpoint |
 
@@ -72,14 +72,16 @@ system、user、tool observation 的 labels 为 `-100`。
 
 Qwen3.5 使用 AutoProcessor 的模板与对应多模态模型类。
 所有参数设置为可训练，但当前数据只有文本：没有被前向计算使用的视觉分支
-不会获得梯度，因此本方案不构成视觉能力训练。默认 ZeRO-2 配置启用
-`ignore_unused_parameters=true`；直接调用 Python 入口且不启用 DeepSpeed 时，
-DDP 才使用相应的未使用参数检测。全量模式搭配非重入 gradient checkpointing。
+不会获得梯度，因此本方案不构成视觉能力训练。直接调用 Python 入口且不启用
+DeepSpeed 时，DDP 使用相应的未使用参数检测。全量模式搭配非重入
+gradient checkpointing，并关闭模型顶层与 `text_config` 中的 `use_cache`。
+先前出现的缓存不兼容警告表示模型已自动关闭缓存；显式同步配置可以避免重复
+警告，但不能据此认定反向传播 OOM 已解决。
 
 ## 单机多卡与显存
 
 默认启动单机 8 个训练进程，需要当前进程可见至少 8 张可用设备。
-直接执行即可使用默认 Qwen3.5-9B、BF16 和 8 卡 ZeRO-2：
+直接执行即可使用默认 Qwen3.5-9B、BF16 和 8 卡 ZeRO-3：
 
 ```bash
 bash scripts/sft.sh
@@ -89,13 +91,30 @@ bash scripts/sft.sh
 `-m torch.distributed.run --standalone --nnodes=1 --nproc-per-node 8`。
 Ascend 上先导入 torch_npu、按 `LOCAL_RANK` 绑定 NPU，随后由 Trainer 检查精度配置；
 Transformers/Accelerate 接入 DeepSpeed 管理分布式训练。各卡处理不同的数据分片，
-ZeRO-2 将梯度和优化器状态分摊到 8 张卡，每张卡仍保留完整模型参数。
+ZeRO-3 将参数、梯度和优化器状态分摊到 8 张卡，需要计算某层时再聚合该层参数。
 默认没有张量并行，TP=1，也没有 FSDP；它不是 DP=4、TP=2 的配置。
 
-默认加载 [`configs/sft_zero2.json`](../configs/sft_zero2.json)。配置不量化模型，
-不开启 CPU/NVMe offload，使用 `overlap_comm=true` 尝试重叠计算和通信，
-`reduce_bucket_size` 和 `allgather_bucket_size` 均为 50,000,000 个元素。
-batch 和精度相关的 `auto` 字段由 Trainer 按实际命令行参数解析。
+默认加载 [`configs/sft_zero3.json`](../configs/sft_zero3.json)。为降低峰值占用，
+关闭通信重叠与参数预取，并限制聚合后参数的保留。配置不量化模型，不开启
+CPU/NVMe offload，也不默认启用 Liger。batch 和精度相关的 `auto` 字段由
+Trainer 按实际命令行参数解析。内存相关配置如下，数量单位为参数/元素，而非字节：
+
+| 配置 | 默认值 | 作用 |
+|---|---:|---|
+| `overlap_comm` | `false` | 避免为通信重叠保留额外缓冲，可能增加等待 |
+| `reduce_bucket_size` | 5,000,000 | 减小梯度归约桶 |
+| `stage3_prefetch_bucket_size` | 0 | 不提前聚合下一批参数 |
+| `stage3_param_persistence_threshold` | 10,000 | 限制单个常驻参数张量的大小 |
+| `stage3_model_persistence_threshold` | 1,000,000 | 限制模型常驻参数总量 |
+| `stage3_max_live_parameters` | 50,000,000 | 限制聚合参数的保留量 |
+| `stage3_max_reuse_distance` | 0 | 减少为后续复用保留的参数 |
+| `sub_group_size` | 50,000,000 | 减小优化器处理的参数组 |
+
+这些设置限制参数缓存和缓冲，**不是设备显存的硬上限**；最大单层仍需聚合完整
+参数，激活、logits、临时算子张量也会占用显存。参数更频繁地释放和重新聚合，
+会增加通信或等待。训练参数在 `from_pretrained` 之前建立，使 ZeRO-3 能参与
+模型加载初始化；保存时开启 `stage3_gather_16bit_weights_on_model_save=true`，
+继续导出后续模型服务和 GRPO 可直接加载的完整权重。
 
 需要更改卡数时显式覆盖，单卡模式不启动 torchrun：
 
@@ -109,31 +128,42 @@ SFT_NPROC_PER_NODE=1 bash scripts/sft.sh
 在默认 8 卡启动时传入 `--gradient-accumulation-steps 1`。
 最后不足一个完整 batch 的更新可能包含更少样本。
 
-ZeRO-2 降低的是梯度与优化器状态的占用，并不切分模型参数或自动消除长序列激活。
-9B 模型、24,576 token 上限在 8 张 64 GB NPU 上能否运行，仍需依据实际样本长度、
-算子实现和显存峰值验证；本次仅进行了离线测试，没有实际加载 NPU 模型。
-如果仍不足，可先缩短最大长度或改用已验证的 ZeRO-3 配置；缩短长度会导致更多
-完整轨迹被剔除，需要检查数据统计。可以覆盖默认 DeepSpeed 配置：
+保持 BF16、全量训练、每卡 batch=1、梯度累积 8、gradient checkpointing 和
+24,576 token 上限，不通过缩短轨迹或量化换取显存。ZeRO-3 不会自动消除长序列
+激活或 logits 的峰值：9B 模型在 8 张 64 GB NPU 上能否完成训练，仍需依据实际
+样本长度、算子实现和显存峰值验证。当前默认配置仅完成离线检查，尚未在 NPU
+上验证。仅有反向传播阶段的大额分配失败，不能确定具体张量来源；若仍 OOM，
+应保留完整调用栈、失败步骤和具体算子的诊断信息。
+
+若服务器已有兼容模型与 NPU 的 Liger 实现，可显式传入 `--liger-kernel`；这不是
+默认依赖，也不能保证本地 Liger 包支持当前 Qwen3.5/NPU 组合。覆盖默认
+DeepSpeed 配置时使用：
 
 ```bash
 bash scripts/sft.sh --deepspeed /path/to/validated-zero-config.json
 ```
 
-ZeRO-3 配置必须设置
+仍保留 ZeRO-2 供显存足够时显式选择；它只分片梯度和优化器状态，每卡保留完整参数：
+
+```bash
+bash scripts/sft.sh --deepspeed configs/sft_zero2.json
+```
+
+自定义 ZeRO-3 配置必须设置
 `zero_optimization.stage3_gather_16bit_weights_on_model_save=true`，确保保存可直接加载的完整权重。
 不要将 LoRA 的显存记录当作全量配置的容量保证。
 
-## ZeRO-2 对速度与精度的影响
+## 分片对速度与精度的影响
 
-ZeRO-2 的目的是节省训练状态显存，不能直接断言它一定比普通 DDP 慢。
-速度取决于通信带宽、序列长度、模型计算量和通信重叠情况；它可能增加通信开销，
-也可能因减少内存压力而更快。实际应比较相同数据、全局 batch 和精度下的
-训练 token/s 与每步耗时。
+ZeRO-3 比 ZeRO-2 进一步分片参数，通常需要更多参数聚合通信；当前默认还关闭
+通信重叠、减少参数缓存，以优先降低显存峰值，可能降低吞吐。实际速度取决于
+通信带宽、序列长度和算子实现，应比较相同数据、全局 batch 和精度下的训练
+token/s 与每步耗时，不能仅按分片阶段给出固定加速或减速比例。
 
-ZeRO-2 本身不降低数值精度，也不量化参数。保持相同数据、优化器、全局 batch、
+ZeRO-2/3 本身不降低数值精度，也不量化参数。保持相同数据、优化器、全局 batch、
 精度和更新规则时，分片在理想算术下实现等价的训练更新。但浮点归约顺序、随机性
 和优化器实现可能造成差异，不能保证权重逐位相同或最终任务分数完全一致。
-默认 BF16 是单独的精度选择，不是 ZeRO-2 带来的精度降级。参见
+默认 BF16 是单独的精度选择，不是 ZeRO 分片带来的精度降级。参见
 [Transformers 的 DeepSpeed 说明](https://huggingface.co/docs/transformers/main/deepspeed)。
 
 ## 日志、恢复和产物
@@ -158,10 +188,23 @@ outputs/models/sft-full/
   train_summary.json         参数计数、模式、训练指标与参数
 ```
 
-训练中断后的恢复示例：
+使用相同 ZeRO 阶段及兼容训练配置时，可从对应 checkpoint 恢复：
 
 ```bash
 bash scripts/sft.sh --resume-from-checkpoint outputs/models/sft-full/checkpoint-100
+```
+
+**从 ZeRO-2 改为 ZeRO-3 时，不要直接用旧 ZeRO-2 checkpoint 的
+`--resume-from-checkpoint`。** 优化器状态的分片格式不能假定可以直接复用。
+如果已有完整导出的 Hugging Face 模型，可将其设为 `BASE_MODEL`，重新建立
+优化器继续微调；这不会恢复原有优化器、调度器或训练步数，因此不等价于断点恢复。
+只有分布式 checkpoint、尚无完整模型时，需先按对应 DeepSpeed/Transformers
+版本的导出流程转换；启动脚本不自动转换。
+
+从基模重新开始 ZeRO-3 训练时，可以显式使用新输出目录保留旧产物：
+
+```bash
+SFT_OUTPUT_DIR=outputs/models/sft-full-zero3 bash scripts/sft.sh
 ```
 
 训练完成后无需 merge，直接用于模型服务和 GRPO：
