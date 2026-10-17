@@ -126,7 +126,24 @@ exec bash "$@"
         self.assertEqual(args.per_device_train_batch_size * args.gradient_accumulation_steps * 8, 64)
         self.assertEqual(args.dtype, "bf16")
         self.assertTrue(args.gradient_checkpointing)
+        self.assertEqual(args.loss_chunk_size, 128)
         self.assertFalse(args.qlora)
+
+    def test_loss_chunk_override_and_explicit_liger_selection(self):
+        from scripts import train_sft
+
+        self.python("fake-bin/python", "current")
+        for options, chunk_size, liger in (
+            (("--loss-chunk-size", "64"), 64, False),
+            (("--loss-chunk-size=0", "--liger-kernel"), 0, True),
+        ):
+            with self.subTest(options=options):
+                text = self.recorded(self.run_script(*options))
+                command = [line[5:-1] for line in text.splitlines() if line.startswith("arg=<")]
+                args = train_sft.parse_args(command[command.index("scripts/train_sft.py") + 1:])
+                self.assertEqual(args.loss_chunk_size, chunk_size)
+                self.assertIs(args.liger_kernel, liger)
+                self.record.unlink()
 
     def test_model_root_override_keeps_default_9b_name(self):
         self.python("fake-bin/python", "current")

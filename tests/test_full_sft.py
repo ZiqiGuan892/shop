@@ -52,6 +52,51 @@ class FullSftTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self.args("--finetuning-t", "lora")
 
+    def test_chunked_loss_options_reject_conflicting_implementations(self):
+        self.assertEqual(self.args().loss_chunk_size, 0)
+        self.assertEqual(self.args("--loss-chunk-size", "128").loss_chunk_size, 128)
+        for options in (("--loss-chunk-size", "-1"),
+                        ("--loss-chunk-size", "128", "--liger-kernel")):
+            with self.subTest(options=options), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.args(*options)
+        args = self.args("--loss-chunk-size", "0", "--liger-kernel")
+        self.assertEqual(train_sft._configure_loss(Model(), args), "liger")
+
+    def test_chunked_loss_install_preserves_model_and_rejects_custom_loss(self):
+        original_loss = MagicMock()
+        chunked_loss = MagicMock()
+        modules = {
+            "transformers.loss.loss_utils": SimpleNamespace(ForCausalLMLoss=original_loss),
+            "shopping_grpo.training.sft.loss": SimpleNamespace(chunked_causal_lm_loss=chunked_loss),
+        }
+        model = Model()
+        model.loss_function = original_loss
+        args = self.args("--loss-chunk-size", "128")
+        with patch.dict(sys.modules, modules):
+            self.assertEqual(train_sft._configure_loss(model, args), "chunked_cross_entropy")
+            model.loss_function(logits="scores", labels="targets", vocab_size=7, num_items_in_batch=11)
+            chunked_loss.assert_called_once_with(
+                logits="scores", labels="targets", vocab_size=7, num_items_in_batch=11, chunk_size=128,
+            )
+            original_loss.assert_not_called()
+            model.loss_function = lambda **kwargs: None
+            with self.assertRaisesRegex(SystemExit, "ForCausalLMLoss"):
+                train_sft._configure_loss(model, args)
+
+    def test_model_metadata_and_counts_use_actual_config_and_unsharded_sizes(self):
+        model = Model()
+        model.config.model_type = "qwen3_5"
+        model.config.text_config = SimpleNamespace(hidden_size=4096, vocab_size=248320)
+        for parameter in model.weights:
+            parameter.ds_numel = 80
+        with redirect_stdout(io.StringIO()):
+            _, counts = train_sft._configure_trainable_model(model, self.args())
+        self.assertEqual(counts, {"total": 160, "trainable": 160})
+        metadata = train_sft._model_metadata(model)
+        self.assertEqual(metadata["model_type"], "qwen3_5")
+        self.assertEqual(metadata["text_config"]["hidden_size"], 4096)
+        self.assertEqual(metadata["text_config"]["vocab_size"], 248320)
+
     def test_full_unfreezes_original_parameters_without_peft_or_adapter(self):
         model = Model()
         forbidden = MagicMock(side_effect=AssertionError("PEFT must not be called"))
@@ -244,6 +289,13 @@ class FullSftTests(unittest.TestCase):
                     order.append("model")
                     return model
 
+                def configure_loss(loaded_model, args):
+                    self.assertIs(loaded_model, model)
+                    self.assertEqual(order, ["training_args", "model"])
+                    self.assertEqual(args.loss_chunk_size, 128)
+                    order.append("loss")
+                    return "chunked_cross_entropy"
+
                 model_class = SimpleNamespace(from_pretrained=load_model)
                 trainer = MagicMock()
                 trainer.train.return_value = SimpleNamespace(training_loss=0.1, metrics={})
@@ -256,18 +308,20 @@ class FullSftTests(unittest.TestCase):
                 with patch.object(sys, "argv", ["train_sft.py", "--model", "test-model",
                                                "--train", "unused", "--output", str(output),
                                                "--deepspeed", str(deepspeed_config), "--dtype", "bf16",
-                                               "--gradient-checkpointing"]), \
+                                               "--gradient-checkpointing", "--loss-chunk-size", "128"]), \
                         patch("scripts.train_sft._validate_sft_splits"), \
                         patch("scripts.train_sft.guard_blind_final"), \
                         patch("scripts.train_sft._training_dependencies", return_value=deps) as dependency_loader, \
                         patch("scripts.train_sft._load_preprocessing_components", return_value=(tokenizer, processor, True)), \
                         patch("scripts.train_sft.load_supervised_examples", return_value=([{"task_id": 1}], {})), \
                         patch("scripts.train_sft._torch_dataset", side_effect=lambda examples, torch: examples), \
+                        patch("scripts.train_sft._configure_loss", side_effect=configure_loss), \
                         patch("scripts.train_sft._loss_only_eval_trainer_class", return_value=trainer_class), \
                         redirect_stdout(io.StringIO()):
                     train_sft.main()
                 dependency_loader.assert_called_once_with("full")
                 self.assertIs(trainer_class.call_args.kwargs["model"], model)
+                self.assertEqual(order, ["training_args", "model", "loss"])
                 self.assertTrue(all(p.requires_grad for p in model.parameters()))
                 trainer.save_model.assert_called_once_with(str(output))
                 if rank == 0:
@@ -275,6 +329,8 @@ class FullSftTests(unittest.TestCase):
                     summary = json.loads((output / "train_summary.json").read_text(encoding="utf-8"))
                     self.assertEqual(summary["finetuning_type"], "full")
                     self.assertEqual(summary["parameter_counts"], {"total": 30, "trainable": 30})
+                    self.assertEqual(summary["acceleration"]["loss_mode"], "chunked_cross_entropy")
+                    self.assertEqual(summary["acceleration"]["loss_chunk_size"], 128)
                 else:
                     processor.save_pretrained.assert_not_called()
                     self.assertFalse((output / "train_summary.json").exists())

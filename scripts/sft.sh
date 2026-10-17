@@ -19,9 +19,13 @@ Defaults: BF16, batch size 1 per device, gradient checkpointing, TP=1.
 DeepSpeed shards parameters, gradients and optimizer states to reduce peak memory.
 Default DeepSpeed config: configs/sft_zero3.json (no offload or quantization).
 Sequence length and effective global batch are unchanged (24,576 and 64).
+Cross entropy uses 128-token chunks with FP32 recomputation during backward;
+the complete vocabulary and all supervised tokens are preserved.
 
 Extra options go to scripts/train_sft.py, e.g. --learning-rate 2e-5,
 --epochs 3, --resume-from-checkpoint PATH, --deepspeed CONFIG.json.
+--loss-chunk-size N changes the loss chunk size (0 restores native model loss).
+To use a compatible Liger installation: --loss-chunk-size 0 --liger-kernel.
 Use the SFT_* variables above to change input/output files.
 HELP
   exit 0
@@ -101,5 +105,6 @@ exec "${launcher[@]}" scripts/train_sft.py \
   --per-device-eval-batch-size 1 \
   --gradient-checkpointing \
   --attention-implementation sdpa \
+  --loss-chunk-size 128 \
   --deepspeed "$DEEPSPEED_CONFIG" \
   "${training_options[@]}"

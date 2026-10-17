@@ -60,6 +60,7 @@ SFT_OUTPUT_DIR=outputs/models/sft-full \
 | 优化器 | PyTorch AdamW |
 | Gradient checkpointing | 开启，full 使用 `use_reentrant=false` |
 | Attention | SDPA |
+| 交叉熵 | 128 token 分块，FP32 计算，每块反向时重算 |
 | 并行方式 | 单机 8 卡数据并行 + DeepSpeed ZeRO-3，DP=8、TP=1 |
 | DeepSpeed 配置 | `configs/sft_zero3.json`；不做 CPU/NVMe offload |
 | 有效全局 batch | `每卡 1 × 8 卡 × 梯度累积 8 = 64` |
@@ -130,12 +131,40 @@ SFT_NPROC_PER_NODE=1 bash scripts/sft.sh
 
 保持 BF16、全量训练、每卡 batch=1、梯度累积 8、gradient checkpointing 和
 24,576 token 上限，不通过缩短轨迹或量化换取显存。ZeRO-3 不会自动消除长序列
-激活或 logits 的峰值：9B 模型在 8 张 64 GB NPU 上能否完成训练，仍需依据实际
-样本长度、算子实现和显存峰值验证。当前默认配置仅完成离线检查，尚未在 NPU
-上验证。仅有反向传播阶段的大额分配失败，不能确定具体张量来源；若仍 OOM，
-应保留完整调用栈、失败步骤和具体算子的诊断信息。
+激活或 logits 的峰值，交叉熵需要单独控制中间张量的大小。
 
-若服务器已有兼容模型与 NPU 的 Liger 实现，可显式传入 `--liger-kernel`；这不是
+主入口默认传入 `--loss-chunk-size 128`，将模型的标准 `ForCausalLMLoss` 替换为
+仓库中的分块实现。原生 loss 会先把整段 `[batch, sequence, vocab]` logits 转成
+FP32，再计算交叉熵；长序列与大词表会使这一步产生数 GiB 甚至更大的临时张量。
+分块实现只在每块内部转换为 FP32，并通过非重入 checkpoint 在反向时重算该块，
+避免所有块的 FP32 softmax 中间结果同时保留。训练与 loss-only 验证均使用此路径。
+
+这不是切割训练轨迹：模型仍一次读取完整上下文，每个监督 token 仍计算完整词表的
+交叉熵，`-100` 掩码、因果标签移位和原来的损失归一化保持一致。各块的 **sum loss
+相加后统一除以分母**，不能取各块 mean loss 的平均值；Trainer 传入
+`num_items_in_batch` 时继续使用该分母。交叉熵仍为 FP32，BF16 模型权重不变。
+理论目标及梯度相同，浮点求和顺序可能造成微小差异，不能承诺最终权重逐位一致。
+
+默认 128 token、248,320 词表时，一块 FP32 logits 约 0.118 GiB；这只是一个张量
+的大小，**不是总显存峰值**。模型仍产生完整 BF16 logits，并需要相应梯度与模型
+激活。分块和重算会增加计算/调度开销。此实现经过 CPU loss/梯度回归检查，尚未在
+NPU 上验证；完整训练仍需按实际长度、算子和可用显存确认。
+
+调整块大小或恢复原生 loss：
+
+```bash
+bash scripts/sft.sh --loss-chunk-size 64
+bash scripts/sft.sh --loss-chunk-size 0
+```
+
+`scripts/train_sft.py` 直接调用时默认值为 0。若模型使用非标准自定义 loss，启用
+分块时会明确报错，不自动覆盖其特殊计算。实现保留模型原生 forward、LM-head 和
+DeepSpeed 参数管理；不引入 CUDA/Triton 融合内核依赖。参见
+[Transformers loss 实现](https://github.com/huggingface/transformers/blob/main/src/transformers/loss/loss_utils.py)
+和 [PyTorch checkpoint 说明](https://docs.pytorch.org/docs/2.9/checkpoint.html)。
+
+若服务器已有兼容模型与 NPU 的 Liger 实现，可显式传入
+`--loss-chunk-size 0 --liger-kernel`；两种 loss 实现不能同时启用。这不是
 默认依赖，也不能保证本地 Liger 包支持当前 Qwen3.5/NPU 组合。覆盖默认
 DeepSpeed 配置时使用：
 
@@ -177,7 +206,18 @@ bash scripts/sft.sh 2>&1 | tee -a outputs/sft/train.log
 ```
 
 日志包含实际 Python、微调类型、可训练参数数量、数据保留/剔除数量，
-以及训练 loss、步耗时、设备峰值显存等。完整输出默认在：
+以及训练 loss、步耗时、设备峰值显存等。默认启动时应能看到：
+
+```text
+deepspeed_zero_stage=3
+loss_mode=chunked_cross_entropy loss_chunk_size=128
+model_config={...}
+```
+
+`model_config` 打印实际文本模型的 `hidden_size`、`intermediate_size`、层数和词表
+大小等；参数数量按 ZeRO 的完整 `ds_numel` 统计。若参数数量明显不符合预期，应
+核对目录中的 `config.json` 与权重，不能仅凭目录名确认模型规格。配置和 loss 模式
+也会写入训练完成后的 `train_summary.json`。完整输出默认在：
 
 ```text
 outputs/models/sft-full/

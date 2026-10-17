@@ -89,6 +89,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--liger-kernel", action="store_true", help="启用 Liger 融合 loss，避免全序列 logits 常驻")
     parser.add_argument(
+        "--loss-chunk-size", type=int, default=0,
+        help="按 token 分块并重算 FP32 交叉熵，保留完整词表与监督；0 使用模型原生 loss。sft.sh 默认 128。",
+    )
+    parser.add_argument(
         "--attention-implementation",
         choices=("auto", "sdpa"),
         default="auto",
@@ -118,6 +122,10 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.finetuning_type == "full" and args.qlora:
         parser.error("--qlora requires --finetuning-type lora; full fine-tuning cannot use QLoRA")
+    if args.loss_chunk_size < 0:
+        parser.error("--loss-chunk-size must be non-negative")
+    if args.loss_chunk_size and args.liger_kernel:
+        parser.error("--liger-kernel requires --loss-chunk-size 0; choose one loss implementation")
     if args.learning_rate is None:
         args.learning_rate = 2e-5 if args.finetuning_type == "full" else 1e-4
     return args
@@ -239,6 +247,35 @@ def _configure_trainable_model(model, args, lora_config=None, task_type=None, ge
     trainable = sum(size(parameter) for parameter in model.parameters() if parameter.requires_grad)
     print(f"  finetuning_type={args.finetuning_type} trainable_params={trainable:,}/{total:,}")
     return model, {"total": total, "trainable": trainable}
+
+
+def _configure_loss(model, args):
+    """Replace only standard causal CE, leaving model forward and ZeRO hooks intact."""
+    if not args.loss_chunk_size:
+        return "liger" if args.liger_kernel else "model_default"
+    from transformers.loss.loss_utils import ForCausalLMLoss
+    from shopping_grpo.training.sft.loss import chunked_causal_lm_loss
+
+    if getattr(model, "loss_function", None) is not ForCausalLMLoss:
+        raise SystemExit(
+            "--loss-chunk-size 只支持标准 Transformers ForCausalLMLoss；"
+            "当前模型使用其他 loss。请核对模型实现，或用 --loss-chunk-size 0 保留原生 loss。"
+        )
+    model.loss_function = partial(chunked_causal_lm_loss, chunk_size=args.loss_chunk_size)
+    return "chunked_cross_entropy"
+
+
+def _model_metadata(model):
+    """Report actual architecture; a directory name does not prove model size."""
+    config = model.config
+    text_config = getattr(config, "text_config", config)
+    return {
+        "model_type": getattr(config, "model_type", None),
+        "text_config": {name: getattr(text_config, name, None) for name in (
+            "model_type", "hidden_size", "intermediate_size", "num_hidden_layers",
+            "vocab_size", "tie_word_embeddings",
+        )},
+    }
 
 
 def _accelerator(torch):
@@ -634,6 +671,16 @@ def main():
         args,
         prepare_model_for_kbit_training=prepare_model_for_kbit_training,
     )
+    loss_mode = _configure_loss(model, args)
+    model_metadata = _model_metadata(model)
+    if training_args.process_index == 0:
+        zero_stage = (
+            json.loads(args.deepspeed.read_text(encoding="utf-8")).get("zero_optimization", {}).get("stage", 0)
+            if args.deepspeed else 0
+        )
+        print(f"  deepspeed_zero_stage={zero_stage}")
+        print(f"  loss_mode={loss_mode} loss_chunk_size={args.loss_chunk_size}")
+        print(f"  model_config={json.dumps(model_metadata, ensure_ascii=False)}")
     model, parameter_counts = _configure_trainable_model(
         model, args, lora_config=LoraConfig, task_type=TaskType, get_peft_model=get_peft_model,
     )
@@ -678,6 +725,7 @@ def main():
         "log_history": trainer.state.log_history,
         "finetuning_type": args.finetuning_type,
         "parameter_counts": parameter_counts,
+        "model_config": model_metadata,
         "device": device_name,
         "peak_device_memory_gib": round(gpu_peak, 2),
         "total_time_minutes": round(total_time / 60, 1) if total_time else None,
@@ -689,6 +737,8 @@ def main():
         },
         "acceleration": {
             "dtype": dtype_name,
+            "loss_mode": loss_mode,
+            "loss_chunk_size": args.loss_chunk_size,
             "liger_kernel": args.liger_kernel,
             "attention_implementation": args.attention_implementation,
             "qlora": args.qlora,
