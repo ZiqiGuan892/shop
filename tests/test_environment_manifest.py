@@ -8,9 +8,32 @@ from shopping_grpo.environment.manifest import (
     shopsimulator_source_commit,
     validate_manifest,
 )
+from scripts.check_grpo_runtime import CURRENT_RUNTIME_FILES, validate_reward_runtime_files
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class EnvironmentManifestTest(unittest.TestCase):
+    def test_repository_runtime_sources_match_frozen_manifest(self):
+        manifest = json.loads((ROOT / "data/environment.json").read_text(encoding="utf-8"))
+        validate_manifest(manifest)
+        validate_reward_runtime_files(manifest, ROOT)
+
+    def test_runtime_source_drift_is_still_rejected(self):
+        manifest = json.loads((ROOT / "data/environment.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative_path in CURRENT_RUNTIME_FILES.values():
+                target = root / relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((ROOT / relative_path).read_bytes())
+            validate_reward_runtime_files(manifest, root)
+            source = root / CURRENT_RUNTIME_FILES["web_agent_text_env.py"]
+            source.write_bytes(source.read_bytes() + b"\n# unexpected source change\n")
+            with self.assertRaisesRegex(SystemExit, "runtime file hash mismatch.*web_agent_text_env.py"):
+                validate_reward_runtime_files(manifest, root)
+
     def test_current_environment_contract_is_validated(self):
         manifest = {
             "manifest_version": MANIFEST_VERSION,
