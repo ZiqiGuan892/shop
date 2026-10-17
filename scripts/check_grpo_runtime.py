@@ -142,14 +142,21 @@ def validate_installed_dependencies(config):
         packages.append("swanlab")
     if config.trainer.device == "npu":
         packages.extend(("torch-npu", "vllm-ascend"))
-    installed = {}
+    from shopping_grpo.training.grpo.verl_source import resolve_verl_source
+
+    try:
+        verl_version, verl_source = resolve_verl_source()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    installed = {"verl": verl_version}
+    print(f"veRL source: {verl_source}, version={verl_version} (pip metadata not required)")
     for package in packages:
+        if package == "verl":
+            continue
         try:
             installed[package] = version(package)
         except PackageNotFoundError as exc:
             raise SystemExit(f"missing GRPO dependency in {sys.executable}: {package}") from exc
-    if installed["verl"].split("+", 1)[0] != "0.8.0":
-        raise SystemExit(f"Shopping integration requires veRL 0.8.0 APIs; found {installed['verl']}")
     return installed
 
 

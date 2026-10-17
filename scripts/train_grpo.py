@@ -193,7 +193,7 @@ def main() -> None:
         "logger": args.logger,
         "config": str(args.config.resolve()),
         "python": sys.executable,
-        "verl_root": environment.get("VERL_ROOT", "installed in selected Python environment"),
+        "verl_root": environment.get("VERL_ROOT", "not set; resolving verl from current Python import path"),
         "log": str(Path(environment["GRPO_OUTPUT_DIR"]) / "train.log"),
     }
     print(json.dumps(audit, ensure_ascii=False, indent=2))

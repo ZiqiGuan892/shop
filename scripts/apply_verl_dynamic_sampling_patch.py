@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check, apply or restore the patch in the invoking Python's veRL installation.
 
-Editable installations and local-version builds are supported; the source
+Source checkouts, editable installations and local-version builds are supported; the source
 checksums still restrict writes to the reviewed veRL 0.8 trainer revision.
 """
 
@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.metadata
 import py_compile
 import shutil
 import subprocess
@@ -25,6 +24,9 @@ PATCH_MARKER = "SHOPPING_GRPO_DYNAMIC_SAMPLING_PATCH_V3"
 BACKUP_SUFFIX = ".shopping-grpo-dynamic-sampling.orig"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PATCH_FILE = PROJECT_ROOT / "patches/verl-0.8.0-shopping-dynamic-sampling.patch"
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from shopping_grpo.training.grpo.verl_source import resolve_verl_source
 
 
 def sha256(path: Path) -> str:
@@ -36,15 +38,8 @@ def sha256(path: Path) -> str:
 
 
 def resolve_installed_ray_trainer() -> Path:
-    installed_version = importlib.metadata.version("verl")
-    if installed_version.split("+", 1)[0] != EXPECTED_VERL_VERSION:
-        raise RuntimeError(
-            f"expected verl=={EXPECTED_VERL_VERSION}, got verl=={installed_version}"
-        )
-
-    import verl
-
-    verl_source = Path(verl.__file__).resolve()
+    selected_version, verl_source = resolve_verl_source(EXPECTED_VERL_VERSION)
+    print(f"veRL source: {verl_source}, version={selected_version} (pip metadata not required)")
     target = verl_source.parent / "trainer" / "ppo" / "ray_trainer.py"
     if not target.is_file():
         raise RuntimeError(f"installed ray_trainer.py does not exist: {target}")

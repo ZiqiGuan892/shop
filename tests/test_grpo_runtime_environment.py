@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import sys
 import tempfile
 import types
 import unittest
@@ -36,6 +37,9 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         )
         self.environment.start()
         self.addCleanup(self.environment.stop)
+        if "VERL_ROOT" in os.environ:
+            saved_verl_root = os.environ.pop("VERL_ROOT")
+            self.addCleanup(os.environ.__setitem__, "VERL_ROOT", saved_verl_root)
         # Load project overrides directly: these checks must not import veRL or
         # require its Hydra package defaults merely to validate the launch recipe.
         self.config = OmegaConf.load(ROOT / "configs/grpo.yaml")
@@ -56,6 +60,10 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
             "torch-npu": "2.9.0",
             "vllm-ascend": "0.18.0+local",
         }
+        self.verl = types.SimpleNamespace(
+            __file__=str(ROOT / "fake-vendor/verl/__init__.py"),
+            __version__="0.8.0+ascend.local",
+        )
 
     def installed_version(self, package):
         try:
@@ -65,6 +73,7 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
 
     def dependencies(self):
         with mock.patch.object(runtime.sys, "version_info", (3, 11, 0)), \
+                mock.patch.dict(sys.modules, {"verl": self.verl}), \
                 mock.patch.object(runtime, "version", side_effect=self.installed_version):
             return runtime.validate_installed_dependencies(self.config)
 
@@ -100,9 +109,18 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         self.assertEqual(self.dependencies()["swanlab"], "0.7.0")
 
     def test_wrong_verl_public_version_is_rejected(self):
-        self.versions["verl"] = "0.7.0+ascend"
+        self.verl.__version__ = "0.7.0+ascend"
         with self.assertRaisesRegex(SystemExit, "requires veRL 0.8.0 APIs"):
             self.dependencies()
+
+    def test_verl_source_without_pip_metadata_is_accepted(self):
+        del self.versions["verl"]
+        self.assertEqual(self.dependencies()["verl"], self.verl.__version__)
+        self.assertIn(self.verl.__file__, self.stdout.getvalue())
+
+    def test_verl_source_version_takes_precedence_over_unrelated_metadata(self):
+        self.versions["verl"] = "0.7.0"
+        self.assertEqual(self.dependencies()["verl"], "0.8.0+ascend.local")
 
     def test_npu_launch_uses_hccl_without_requiring_cuda(self):
         torch = self.mock_npu_torch()

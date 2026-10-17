@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import sys
+import os
 import tempfile
 import types
 import unittest
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from unittest import mock
 
@@ -26,9 +28,13 @@ class GRPOPatchEnvironmentTest(unittest.TestCase):
         self.target.write_text("# customized trainer\n", encoding="utf-8")
         self.verl = types.ModuleType("verl")
         self.verl.__file__ = str(self.init_file)
+        if "VERL_ROOT" in os.environ:
+            saved_verl_root = os.environ.pop("VERL_ROOT")
+            self.addCleanup(os.environ.__setitem__, "VERL_ROOT", saved_verl_root)
 
     def resolve(self, version):
-        with mock.patch.object(patcher.importlib.metadata, "version", return_value=version), \
+        self.verl.__version__ = version
+        with mock.patch("importlib.metadata.version", side_effect=PackageNotFoundError("verl")), \
                 mock.patch.dict(sys.modules, {"verl": self.verl}):
             return patcher.resolve_installed_ray_trainer()
 
@@ -41,7 +47,7 @@ class GRPOPatchEnvironmentTest(unittest.TestCase):
 
     def test_rejects_other_public_versions(self):
         for version in ("0.7.0", "0.8.1+ascend", "0.8.0rc1", "0.8.0.post1"):
-            with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, "expected verl==0.8.0"):
+            with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, "requires veRL 0.8.0 APIs"):
                 self.resolve(version)
 
     def test_missing_trainer_has_actionable_error(self):

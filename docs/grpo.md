@@ -48,6 +48,32 @@ extra path is needed. Otherwise, set `VERL_ROOT` to the **checkout containing
 export VERL_ROOT=/path/to/verl-checkout
 ```
 
+The directory must contain `$VERL_ROOT/verl/__init__.py`. A source checkout can
+work with `python -m verl.trainer.main_ppo` without ever having been registered
+with pip: a launcher running from the checkout root makes that source visible
+to Python. Switching to the Shopping directory removes that implicit search
+path. `VERL_ROOT` makes the selection explicit for preflight and training.
+
+`pip show verl` reports distribution metadata, not source importability. Both
+preflight and the dynamic-sampling patch helper read the selected package's
+`__version__` (or its own `version/version` file), print its source path, and
+still enforce the supported version and APIs. They do not require veRL pip
+metadata, and do not borrow version metadata from another installed checkout.
+Other required dependencies are still checked in the selected environment.
+
+Verify the path and imports before training:
+
+```bash
+test -f "$VERL_ROOT/verl/__init__.py"
+PYTHONPATH="$VERL_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  "$PYTHON_BIN" -c 'import verl; print(verl.__file__); print(verl.__version__)'
+bash scripts/grpo.sh --check-only
+```
+
+A missing dependency during `import verl` is reported with its original error;
+it is distinct from a missing source path. No reinstall of the working NPU
+stack is needed merely because `pip show verl` has no entry.
+
 Preflight requires Python 3.10 or newer, the veRL 0.8 APIs used by the adapter,
 compatible installed dependencies and working NPU/HCCL support. It prints the
 selected versions and source paths instead of requiring the CUDA package pins
