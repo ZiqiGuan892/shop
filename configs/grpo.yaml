@@ -25,8 +25,9 @@ actor_rollout_ref:
     path: ${oc.env:GRPO_MODEL_PATH}
     trust_remote_code: true
     enable_gradient_checkpointing: true
-    # Keep long trajectories; move saved layer activations to host memory.
-    enable_activation_offload: true
+    # The vendor offloader fails in group scheduling on this NPU/FSDP recipe.
+    # Keep ordinary gradient checkpointing without its offload wrapper.
+    enable_activation_offload: false
     use_remove_padding: false
     lora_rank: 16
     lora_alpha: 32

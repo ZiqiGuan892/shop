@@ -42,7 +42,7 @@ class DynamicSamplingConfigTest(unittest.TestCase):
         self.assertFalse(config.actor_rollout_ref.actor.use_dynamic_bsz)
         self.assertFalse(config.actor_rollout_ref.actor.calculate_entropy)
         self.assertEqual(config.actor_rollout_ref.actor.entropy_coeff, 0.0)
-        self.assertTrue(config.actor_rollout_ref.model.enable_activation_offload)
+        self.assertFalse(config.actor_rollout_ref.model.enable_activation_offload)
         self.assertTrue(config.actor_rollout_ref.model.enable_gradient_checkpointing)
         self.assertTrue(config.actor_rollout_ref.actor.fsdp_config.reshard_after_forward)
         self.assertFalse(config.actor_rollout_ref.actor.fsdp_config.forward_prefetch)

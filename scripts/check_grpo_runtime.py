@@ -613,15 +613,24 @@ def validate_training_memory_budget(config):
 
 
 def validate_activation_offload_api(config):
-    """Check the selected vendor API without creating a model or device streams."""
+    """Reject a known failing recipe, then inspect the API without device work."""
     model = config.actor_rollout_ref.model
     if not bool(model.get("enable_activation_offload", False)):
         return
+    strategy = str(config.actor_rollout_ref.actor.strategy)
+    if str(config.trainer.device) == "npu" and strategy == "fsdp":
+        raise SystemExit(
+            "activation offload is disabled for the NPU/FSDP recipe: the vendor "
+            "offloader has failed with a layer_window_map KeyError during actor forward. "
+            "Set actor_rollout_ref.model.enable_activation_offload=false; keep "
+            "enable_gradient_checkpointing=true. An API signature check cannot "
+            "validate the offloader's group scheduling."
+        )
     try:
         module = importlib.import_module("verl.utils.activation_offload")
         inspect.signature(module.enable_activation_offloading).bind(
             None,
-            str(config.actor_rollout_ref.actor.strategy),
+            strategy,
             enable_ckpt=bool(model.get("enable_gradient_checkpointing", False)),
         )
     except (ImportError, AttributeError, TypeError, ValueError) as exc:
@@ -629,8 +638,9 @@ def validate_activation_offload_api(config):
             "selected veRL fork lacks the required activation-offload API: " + str(exc)
         ) from exc
     print("GRPO activation-offload API preflight passed: " + json.dumps({
-        "strategy": str(config.actor_rollout_ref.actor.strategy),
+        "strategy": strategy,
         "gradient_checkpointing": bool(model.get("enable_gradient_checkpointing", False)),
+        "validation": "signature only; runtime compatibility is not verified",
     }, sort_keys=True))
 
 

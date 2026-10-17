@@ -278,7 +278,7 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         report = self.memory_budget_report()
         self.assertFalse(report["actor_calculate_entropy"])
         self.assertEqual(report["actor_entropy_coeff"], 0.0)
-        self.assertTrue(report["actor_activation_offload"])
+        self.assertFalse(report["actor_activation_offload"])
         self.assertTrue(report["actor_gradient_checkpointing"])
         self.assertTrue(report["actor_reshard_after_forward"])
         self.assertFalse(report["actor_forward_prefetch"])
@@ -288,14 +288,14 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         model = self.config.actor_rollout_ref.model
         actor.calculate_entropy = True
         actor.entropy_coeff = 0.01
-        model.enable_activation_offload = False
+        model.enable_activation_offload = True
         model.enable_gradient_checkpointing = False
         actor.fsdp_config.reshard_after_forward = False
         actor.fsdp_config.forward_prefetch = True
         report = self.memory_budget_report()
         self.assertTrue(report["actor_calculate_entropy"])
         self.assertEqual(report["actor_entropy_coeff"], 0.01)
-        self.assertFalse(report["actor_activation_offload"])
+        self.assertTrue(report["actor_activation_offload"])
         self.assertFalse(report["actor_gradient_checkpointing"])
         self.assertFalse(report["actor_reshard_after_forward"])
         self.assertTrue(report["actor_forward_prefetch"])
@@ -319,6 +319,9 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
                     runtime.validate_training_memory_budget(self.config)
 
     def test_activation_offload_api_is_checked_without_executing_it(self):
+        self.config.trainer.device = "cuda"
+        self.config.actor_rollout_ref.model.enable_activation_offload = True
+
         def enable_activation_offloading(model, strategy, enable_ckpt=False):
             raise AssertionError("API preflight must not create a model or device streams")
 
@@ -330,8 +333,11 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
                     runtime.validate_activation_offload_api(self.config)
                 importer.assert_called_once_with("verl.utils.activation_offload")
         self.assertIn("activation-offload API preflight passed", self.stdout.getvalue())
+        self.assertIn("signature only; runtime compatibility is not verified", self.stdout.getvalue())
 
     def test_activation_offload_missing_module_or_function_fails_before_training(self):
+        self.config.trainer.device = "cuda"
+        self.config.actor_rollout_ref.model.enable_activation_offload = True
         with mock.patch.object(runtime.importlib, "import_module", side_effect=ImportError("missing module")):
             with self.assertRaisesRegex(SystemExit, "activation-offload API"):
                 runtime.validate_activation_offload_api(self.config)
@@ -340,6 +346,9 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
                 runtime.validate_activation_offload_api(self.config)
 
     def test_activation_offload_incompatible_signature_is_rejected(self):
+        self.config.trainer.device = "cuda"
+        self.config.actor_rollout_ref.model.enable_activation_offload = True
+
         def missing_checkpointing_keyword(model, strategy):
             raise AssertionError("preflight must only inspect this callable")
 
@@ -353,10 +362,22 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
                     with self.assertRaisesRegex(SystemExit, "activation-offload API"):
                         runtime.validate_activation_offload_api(self.config)
 
-    def test_disabled_activation_offload_does_not_import_vendor_module(self):
-        self.config.actor_rollout_ref.model.enable_activation_offload = False
+    def test_default_disabled_activation_offload_does_not_import_vendor_module(self):
+        self.assertFalse(self.config.actor_rollout_ref.model.enable_activation_offload)
         with mock.patch.object(runtime.importlib, "import_module") as importer:
             runtime.validate_activation_offload_api(self.config)
+        importer.assert_not_called()
+
+    def test_npu_fsdp_activation_offload_is_rejected_before_importing_vendor_module(self):
+        self.assertEqual(self.config.trainer.device, "npu")
+        self.assertEqual(self.config.actor_rollout_ref.actor.strategy, "fsdp")
+        self.config.actor_rollout_ref.model.enable_activation_offload = True
+        with mock.patch.object(runtime.importlib, "import_module") as importer:
+            with self.assertRaisesRegex(
+                SystemExit, "activation offload is disabled for the NPU/FSDP recipe"
+            ) as error:
+                runtime.validate_activation_offload_api(self.config)
+        self.assertIn("actor_rollout_ref.model.enable_activation_offload=false", str(error.exception))
         importer.assert_not_called()
 
     def test_rollout_tensor_parallelism_must_divide_available_cards(self):

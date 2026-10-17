@@ -274,7 +274,7 @@ SFT policy; they have not been validated by a training run on your server.
 | Save / validation frequency | 50 / 50; validation before training enabled |
 | KL reward / KL loss | disabled / disabled |
 | Policy entropy measurement | disabled; entropy coefficient remains 0 |
-| Actor activation memory | native veRL activation offload + gradient checkpointing |
+| Actor activation memory | gradient checkpointing; native activation offload disabled |
 | Dynamic sampling | enabled; at most 3 generation batches and 10 consecutive skipped updates |
 
 The prompt batch is global: 8 devices do not multiply it by another factor of
@@ -299,16 +299,21 @@ Actor and rollout parallelism serve different phases: FSDP shards the actor
 across 8 devices, while TP=2 distributes a rollout model across each pair.
 
 For memory and NPU runtime behavior, actor parameter/optimizer offload and
-gradient checkpointing remain enabled, and **activation offload is enabled**.
-veRL moves saved layer activations to host memory and restores them for backward;
-when combined with checkpointing, its offload implementation supplies the
-checkpoint wrapper. This adds host-memory and transfer costs and can reduce
-training throughput. The native implementation skips offload with a warning
-if it finds fewer than three wrapped layers; inspect that warning if changing
-the model's FSDP wrapping policy. FSDP explicitly reshards parameters after forward and
-leaves forward prefetch disabled. Parameter/optimizer offload alone does not
-eliminate saved activations or the loss's full-vocabulary intermediate tensors.
-See [veRL activation offload](https://github.com/volcengine/verl/blob/main/verl/utils/activation_offload.py).
+gradient checkpointing remain enabled. **Native activation offload is disabled**
+for this NPU/FSDP recipe: the vendor offloader's forward group scheduling has
+failed with `KeyError: 59` at `layer_window_map[self.offloaded_group_count]`.
+A subsequent assertion in `offload_fsdp_model_to_cpu` occurred while cleaning
+up that failed forward; it does not replace the original error. Preflight rejects
+activation-offload overrides for this recipe. Checking only the offloader's
+function signature cannot establish runtime compatibility, and ignoring the
+group error or resetting its counters is not a validated repair.
+
+With activation offload disabled, the actor retains ordinary gradient
+checkpointing without veRL's activation-offload wrapper. Parameter/optimizer
+offload is a separate setting and remains enabled. FSDP explicitly reshards
+parameters after forward and leaves forward prefetch disabled. These settings
+do not eliminate saved activations or the loss's full-vocabulary intermediate
+tensors. See [veRL activation offload](https://github.com/volcengine/verl/blob/main/verl/utils/activation_offload.py).
 
 `actor.calculate_entropy=false` removes the entropy statistic and its graph.
 The entropy coefficient was already zero, so this preserves the mathematical
@@ -325,10 +330,12 @@ response and total sequence limits, rollout count, learning rate, clipping,
 LoRA rank and effective batch. Per-device micro batch is already one; lowering
 token limits used only for dynamic batching would not split that single long
 trajectory in this static-batch recipe. Preflight prints the selected entropy,
-activation-offload, checkpointing and FSDP settings and verifies the native
-offload API without starting a model. It cannot certify the peak memory of a
-particular server build or trajectory; model logits and their gradients still
-require device memory.
+activation-offload, checkpointing and FSDP settings and rejects the known failing
+offload configuration without starting a model. It cannot certify the peak
+memory of a particular server build or trajectory; model logits and their
+gradients still require device memory. Disabling the offload wrapper addresses
+its forward failure; the remaining memory settings still need server validation
+through actor backward before the original OOM can be considered resolved.
 
 The rollout memory utilization is 0.45,
 with at most 8 sequences and eager execution enabled. Eager execution avoids
