@@ -104,12 +104,14 @@ Mask。这样模型学习的是可执行的工具策略，而不是背诵环境�
 
 ### GRPO 是怎么训练的？
 
-GRPO 从合并后的 SFT 模型开始。veRL 在 ShopSimulator 中为每个 Prompt 在线生成
+GRPO 默认从完整导出的 Qwen3.5-9B SFT 模型开始。veRL 在 ShopSimulator 中为每个 Prompt 在线生成
 四条轨迹，环境用确定性的 Reward v3 评估最终购买结果、约束满足程度和终止行为。
 训练不使用额外的 LLM-as-a-Judge Reward Model。
 
-本仓库没有复制 veRL 源码，而是固定安装 `verl==0.8.0`，并保留项目自己的
-AgentLoop、工具适配层、运行时兼容代码和一个带 SHA-256 校验的小补丁。详细配置见
+本仓库没有复制 veRL 源码。GRPO 入口复用当前服务器 Python 环境中的 veRL 0.8
+接口，保留项目自己的 AgentLoop、工具适配层、运行时兼容代码和带 SHA-256 校验的
+动态采样补丁；不会自动重装服务器依赖。默认单机 8 张 NPU、FSDP Actor、Rollout TP=2，
+GRPO 继续使用原有 LoRA 配方。详细配置见
 [GRPO 文档](docs/grpo.md)。
 
 ### 评估流水线是怎么设计的？
@@ -189,7 +191,8 @@ SFT 带来了主要能力提升，让模型学会合法工具调用、长程搜�
 
 ## 训练硬件与耗时
 
-所有训练均使用单张 NVIDIA RTX 6000（96 GB）完成。
+以下已有实验的训练耗时来自单张 NVIDIA RTX 6000（96 GB），不代表当前 9B、
+单机 8 张 NPU 默认配置的耗时或效果；新配置仍需在目标服务器上验证。
 
 ### SFT LoRA 训练（448 条训练数据，3 个 epoch）
 
@@ -219,14 +222,16 @@ SFT 带来了主要能力提升，让模型学会合法工具调用、长程搜�
 ## 环境要求
 
 - Linux；
-- NVIDIA GPU 和兼容的 CUDA Driver；
-- [`uv`](https://docs.astral.sh/uv/)；
-- 大约 25 GB 可用磁盘空间，用于依赖、模型权重和运行产物；
+- 已配置兼容的 PyTorch、Transformers、veRL 和 vLLM；当前 GRPO 默认使用 8 张 Ascend NPU，需要 torch_npu、vllm-ascend 和 HCCL；
+- 安装独立 ShopSimulator 时需要 [`uv`](https://docs.astral.sh/uv/)；
+- 为 9B 模型、checkpoint、优化器状态、商品数据和日志预留足够磁盘空间；
 - 历史 LoRA SFT 配方以 48 GB 显存为设计目标；当前默认 9B 全量 SFT 使用 8 卡 ZeRO-3，容量需实测；
-- GRPO 配置按照单张 96 GB GPU 验证。
+- GRPO 默认使用 FSDP 分片 Actor、Rollout TP=2、BF16；实际峰值显存和性能需实测。
 
-主训练环境使用 Python 3.12，ShopSimulator 使用隔离的 Python 3.10 环境。
-`scripts/setup.sh` 会通过 `uv` 创建并安装两套环境。
+已有服务器环境使用 Python 3.10 或更新版本，通过 `--check-only` 检查实际依赖、
+设备和集成接口，不强制换成 Python 3.12 或 CUDA 固定版本。独立 ShopSimulator
+使用 Python 3.10。`scripts/setup.sh` 的全新安装配方使用固定训练依赖和 Python 3.12，
+不应覆盖已有可用的 Ascend 训练环境。
 
 ## 快速开始
 
@@ -349,7 +354,7 @@ SFT_VALIDATION_FILE=outputs/sft-collection/clean/validation.jsonl \
   bash scripts/sft.sh
 ```
 
-本节的 9B 默认只适用于 SFT；`serve_model.sh` 未传位置参数时仍选择 2B。
+SFT 默认从 9B 基模训练，GRPO 默认接续它的完整 SFT 输出；`serve_model.sh` 未传位置参数时仍选择 2B。
 比较 9B 的训练收益时，baseline 阶段应先用 `bash scripts/serve_model.sh Qwen3.5-9B`
 服务同一基模，再运行 `bash scripts/baseline.sh`。评测请求的 `SERVED_MODEL_NAME`
 须与服务一致，默认均为 `shopping-agent`。
@@ -357,17 +362,37 @@ SFT_VALIDATION_FILE=outputs/sft-collection/clean/validation.jsonl \
 
 ### 5. 训练 GRPO
 
-先只解析并打印最终命令，不启动 CUDA 或 Ray：
+保持 ShopSimulator 运行，停止自己的 Baseline/SFT `vllm serve` 以释放 NPU。
+GRPO 会创建内部 vLLM Rollout worker，不需要单独启动模型服务。
+先激活服务器已有的 veRL 环境；脚本按 `PYTHON_BIN` → 当前 Python → 仓库 `.venv`
+的顺序选择解释器。若需要指定 veRL 源码，设置 `VERL_ROOT=/path/to/verl-checkout`，
+指向包含 `verl/__init__.py` 的仓库目录。
+
+先打印最终命令，再进行不加载权重、不启动 Ray 或训练的预检查：
 
 ```bash
 bash scripts/grpo.sh --dry-run
+bash scripts/grpo.sh --check-only
 ```
 
-开始训练：
+默认模型是 `outputs/models/sft-full`，可用 `--model` 或 `GRPO_MODEL_PATH` 指向
+其他完整 9B SFT 输出；找不到时不会自动退回基模。预检查通过后开始训练：
 
 ```bash
 bash scripts/grpo.sh
 ```
+
+默认单机 8 张 NPU：Actor 使用 FSDP 分片，Rollout TP=2（4 组副本），
+启用 BF16 和 eager 模式。保留原有每批 2 个 Prompt、每个 Prompt 4 条轨迹、
+LoRA rank=16/alpha=32、学习率 `1e-6`、最大长度 24,576 和 500 个训练 step。
+全局一次有效更新对应 8 条轨迹，不再乘以卡数。这里的 FSDP/LoRA 与 SFT 的
+DeepSpeed ZeRO-3 全量微调分别配置。单机 veRL 仍需要 Ray，但不会等待第二个节点。
+
+项目的动态采样补丁仍必须通过校验。若服务器分支源码哈希不匹配，先按
+[GRPO 指南](docs/grpo.md)检查和移植补丁，不要覆盖安装已有环境或静默关闭动态采样。
+控制台日志写入 `outputs/models/grpo/train.log`，同时保留 `launch.json` 和
+`training_diagnostics.jsonl`。输出目录必须新建或为空；保留旧产物时使用
+`--output outputs/models/grpo-9b`，后续导出路径也相应修改。
 
 根据验证集指标选择 Checkpoint，并导出 veRL Actor：
 
@@ -452,6 +477,8 @@ tests/                           核心单元、入口和 Wheel 安装检查
 | `SFT_VALIDATION_FILE` | `data/sft/validation.jsonl` |
 | `SFT_OUTPUT_DIR` | `outputs/models/sft-full` |
 | `SFT_NPROC_PER_NODE` | `8`（单机数据并行 + ZeRO-3，TP=1） |
+| `GRPO_MODEL_PATH` | `outputs/models/sft-full`（完整 9B SFT 模型） |
+| `VERL_ROOT` | 未设置：使用所选 Python 中安装的 veRL；设置时为源码仓库根目录 |
 
 GRPO 的高级 Hydra 参数可以追加在 `--` 后：
 

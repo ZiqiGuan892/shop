@@ -1,5 +1,7 @@
-# Shopping Agent GRPO configuration.
+# Shopping Agent GRPO: Qwen3.5-9B SFT policy, single node / eight Ascend NPUs.
 hydra:
+  run:
+    dir: ${oc.env:GRPO_OUTPUT_DIR}/hydra
   searchpath:
     - pkg://verl/trainer/config
 
@@ -32,6 +34,7 @@ actor_rollout_ref:
     override_config:
       attn_implementation: sdpa
   actor:
+    strategy: fsdp
     ppo_mini_batch_size: 2
     ppo_micro_batch_size_per_gpu: 1
     ppo_max_token_len_per_gpu: 24576
@@ -42,6 +45,7 @@ actor_rollout_ref:
     clip_ratio_high: 0.20
     entropy_coeff: 0.0
     calculate_entropy: true
+    use_torch_compile: false
     use_kl_loss: false
     kl_loss_coef: 0.0
     kl_loss_type: low_var_kl
@@ -49,6 +53,8 @@ actor_rollout_ref:
       lr: 1.0e-6
       lr_warmup_steps_ratio: 0.03
     fsdp_config:
+      model_dtype: bfloat16
+      use_torch_compile: false
       optimizer_offload: true
       param_offload: true
   rollout:
@@ -57,7 +63,10 @@ actor_rollout_ref:
     n: 4
     temperature: 0.7
     top_p: 0.9
-    tensor_model_parallel_size: 1
+    tensor_model_parallel_size: 2
+    dtype: bfloat16
+    # Avoid NPU graph capture exhausting stream/SQ-CQ resources.
+    enforce_eager: true
     gpu_memory_utilization: 0.45
     max_num_seqs: 8
     max_model_len: 24576
@@ -87,6 +96,7 @@ actor_rollout_ref:
       top_p: 1.0
       do_sample: false
   ref:
+    strategy: fsdp
     log_prob_micro_batch_size_per_gpu: 1
     log_prob_max_token_len_per_gpu: 24576
     log_prob_use_dynamic_bsz: false
@@ -125,7 +135,14 @@ reward_model:
 
 ray_kwargs:
   ray_init:
+    # A local Ray runtime is still required by veRL on one machine.
+    address: local
+    resources:
+      NPU: ${trainer.n_gpus_per_node}
     runtime_env:
+      env_vars:
+        PYTHONPATH: ${oc.env:PYTHONPATH}
+        PYTHONUNBUFFERED: "1"
       worker_process_setup_hook: shopping_grpo.training.grpo.compat.install_torch_padding_fallback
 
 trainer:
@@ -138,5 +155,6 @@ trainer:
   project_name: shopping-grpo
   experiment_name: shopping-agent-grpo
   default_local_dir: ${oc.env:GRPO_OUTPUT_DIR}
-  n_gpus_per_node: 1
+  device: npu
+  n_gpus_per_node: 8
   nnodes: 1

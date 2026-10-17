@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared interpreter selection for evaluation, reports and SFT.
+# Shared interpreter selection for evaluation, reports and training.
 
 init_project_python() {
   local repo_root="$1"

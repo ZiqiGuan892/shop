@@ -100,14 +100,16 @@ Both steps exclude Final-200 and the current GRPO task pool. See
 
 ### How GRPO is trained
 
-GRPO starts from the merged SFT model. veRL generates four online trajectories
+GRPO defaults to the complete Qwen3.5-9B SFT model. veRL generates four online trajectories
 per prompt in ShopSimulator, while deterministic Reward v3 scores the terminal
 purchase, constraint satisfaction and termination behavior. No additional
 LLM-as-a-Judge reward model is used for training.
 
-The repository pins `verl==0.8.0` instead of copying its source. It keeps only
-the project-specific AgentLoop, tool adapter, runtime compatibility code and a
-small SHA-256-checked patch. See the [GRPO guide](docs/grpo.md) for details.
+The launcher reuses the server's active Python environment and veRL 0.8 APIs
+instead of replacing installed dependencies or copying veRL source. The project
+keeps its AgentLoop, tool adapter, runtime compatibility code and SHA-256-checked
+dynamic-sampling patch. Defaults use one machine with 8 NPUs, an FSDP actor and
+rollout TP=2, retaining the GRPO LoRA recipe. See the [GRPO guide](docs/grpo.md).
 
 ### How evaluation works
 
@@ -178,7 +180,9 @@ different hardware or dependency versions will produce bit-identical training.
 
 ## Training hardware and time
 
-All training used a single NVIDIA RTX 6000 with 96 GB of GPU memory.
+The reported training times below come from a single NVIDIA RTX 6000 with
+96 GB of GPU memory. They do not establish performance or scores for the current
+9B, eight-NPU defaults, which need validation on the target server.
 
 ### LoRA SFT training (448 training examples, 3 epochs)
 
@@ -207,16 +211,17 @@ All training used a single NVIDIA RTX 6000 with 96 GB of GPU memory.
 
 ## Requirements
 
-- Linux with an NVIDIA GPU and a compatible CUDA driver;
-- [`uv`](https://docs.astral.sh/uv/);
-- about 25 GB of free disk for environments, weights and generated artifacts;
+- Linux with compatible PyTorch, Transformers, veRL and vLLM; the current GRPO default uses 8 Ascend NPUs with torch_npu, vllm-ascend and HCCL;
+- [`uv`](https://docs.astral.sh/uv/) when installing the isolated ShopSimulator;
+- enough disk for 9B weights, checkpoints, optimizer state, product data and logs;
 - the historical LoRA SFT recipe targeted approximately 48 GB GPU memory; the current 9B full SFT default uses 8-device ZeRO-3 and needs a measured memory check;
-- one 96 GB GPU for the provided GRPO recipe.
+- an FSDP actor, rollout TP=2 and BF16 for GRPO; measure actual memory use and throughput on the server.
 
-The main environment uses Python 3.12. ShopSimulator is isolated on Python 3.10.
-`uv` creates both environments. veRL is **installed as the pinned
-`verl==0.8.0` dependency**; its source is not copied into this repository. Only
-the Shopping Agent adapter and a small version-checked patch live here.
+Existing server environments use Python 3.10 or newer. `--check-only` verifies
+installed dependencies, devices and integration APIs without imposing Python
+3.12 or CUDA package pins. ShopSimulator is isolated on Python 3.10. The clean
+installation recipe in `scripts/setup.sh` uses pinned training dependencies
+and Python 3.12; do not use it to replace a working Ascend training environment.
 
 ## Quick start
 
@@ -349,7 +354,8 @@ SFT_VALIDATION_FILE=outputs/sft-collection/clean/validation.jsonl \
   bash scripts/sft.sh
 ```
 
-The 9B default applies to SFT; `serve_model.sh` still selects 2B when its model
+SFT starts from the 9B base model and GRPO defaults to its complete SFT output;
+`serve_model.sh` still selects 2B when its model
 argument is omitted. For a 9B comparison, first serve the same base model with
 `bash scripts/serve_model.sh Qwen3.5-9B`, then run `bash scripts/baseline.sh`.
 The evaluation `SERVED_MODEL_NAME` must match the server alias; both default to
@@ -357,17 +363,44 @@ The evaluation `SERVED_MODEL_NAME` must match the server alias; both default to
 
 ### 5. Train GRPO
 
-First inspect the fully resolved launcher without starting CUDA or Ray:
+Keep ShopSimulator running and stop your baseline/SFT `vllm serve` process to
+release the NPUs. GRPO creates internal vLLM rollout workers; a separate model
+server is not required. Activate the existing veRL environment first. Interpreter
+selection is `PYTHON_BIN`, then the active Python, then the repository `.venv`.
+If needed, set `VERL_ROOT=/path/to/verl-checkout` to the checkout containing
+`verl/__init__.py`.
+
+Inspect the resolved command, then check the runtime without loading model
+weights, starting Ray or starting training:
 
 ```bash
 bash scripts/grpo.sh --dry-run
+bash scripts/grpo.sh --check-only
 ```
 
-Then train:
+The default model is `outputs/models/sft-full`. Use `--model` or
+`GRPO_MODEL_PATH` for another complete 9B SFT output; a missing model never
+silently falls back to the base model. Train after preflight succeeds:
 
 ```bash
 bash scripts/grpo.sh
 ```
+
+Defaults use a single machine with 8 NPUs, an FSDP actor, rollout TP=2 (4 replica
+groups), BF16 and eager execution. The original 2-prompt global batch, 4 rollouts
+per prompt, LoRA rank 16 / alpha 32, `1e-6` learning rate, 24,576-token limit and
+500 training steps remain. Each retained global update has 8 trajectories; the
+device count does not multiply it again. GRPO's FSDP/LoRA setup is independent
+of full SFT's DeepSpeed ZeRO-3 configuration. veRL still requires Ray locally,
+but the launcher does not wait for a second node.
+
+The dynamic-sampling patch must still pass verification. If the server fork's
+source hash differs, follow the [GRPO guide](docs/grpo.md) to inspect and port
+the patch rather than replacing the working environment or disabling sampling.
+Console output is saved to `outputs/models/grpo/train.log`, alongside
+`launch.json` and `training_diagnostics.jsonl`. The output directory must be
+new or empty. Use `--output outputs/models/grpo-9b` to retain earlier artifacts
+and adjust the export path accordingly.
 
 Choose a checkpoint using validation metrics and export its actor:
 
@@ -451,6 +484,8 @@ Most users only need these environment variables:
 | `SFT_VALIDATION_FILE` | `data/sft/validation.jsonl` |
 | `SFT_OUTPUT_DIR` | `outputs/models/sft-full` |
 | `SFT_NPROC_PER_NODE` | `8` (single-node data parallelism + ZeRO-3, TP=1) |
+| `GRPO_MODEL_PATH` | `outputs/models/sft-full` (complete 9B SFT model) |
+| `VERL_ROOT` | Unset: installed veRL in selected Python; otherwise the veRL checkout root |
 
 Advanced GRPO overrides can be appended after `--`:
 

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Apply or restore the pinned veRL 0.8 dynamic-sampling patch."""
+"""Check, apply or restore the patch in the invoking Python's veRL installation.
+
+Editable installations and local-version builds are supported; the source
+checksums still restrict writes to the reviewed veRL 0.8 trainer revision.
+"""
 
 from __future__ import annotations
 
@@ -33,7 +37,7 @@ def sha256(path: Path) -> str:
 
 def resolve_installed_ray_trainer() -> Path:
     installed_version = importlib.metadata.version("verl")
-    if installed_version != EXPECTED_VERL_VERSION:
+    if installed_version.split("+", 1)[0] != EXPECTED_VERL_VERSION:
         raise RuntimeError(
             f"expected verl=={EXPECTED_VERL_VERSION}, got verl=={installed_version}"
         )
@@ -41,10 +45,6 @@ def resolve_installed_ray_trainer() -> Path:
     import verl
 
     verl_source = Path(verl.__file__).resolve()
-    expected_environment = (PROJECT_ROOT / ".venv").resolve()
-    if not verl_source.is_relative_to(expected_environment):
-        raise RuntimeError(f"verl.__file__ is not from the project environment: {verl_source}")
-
     target = verl_source.parent / "trainer" / "ppo" / "ray_trainer.py"
     if not target.is_file():
         raise RuntimeError(f"installed ray_trainer.py does not exist: {target}")
@@ -90,7 +90,9 @@ def apply_patch(target: Path) -> None:
     if target_hash != EXPECTED_ORIGINAL_SHA256:
         raise RuntimeError(
             "refusing to patch unknown ray_trainer.py: "
-            f"expected original SHA256 {EXPECTED_ORIGINAL_SHA256}, got {target_hash}"
+            f"expected original SHA256 {EXPECTED_ORIGINAL_SHA256}, got {target_hash}. "
+            "This veRL fork needs a reviewed port of the dynamic-sampling patch; "
+            "do not reinstall the working server environment or bypass the checksum check."
         )
     if not PATCH_FILE.is_file():
         raise RuntimeError(f"patch file is missing: {PATCH_FILE}")
@@ -147,7 +149,13 @@ def restore_patch(target: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Use the veRL installation imported by this Python interpreter, including "
+            "an external editable checkout. Source SHA256 checks remain mandatory; "
+            "customized forks require a reviewed patch port."
+        )
+    )
     parser.add_argument(
         "--restore",
         action="store_true",

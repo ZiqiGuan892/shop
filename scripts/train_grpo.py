@@ -30,12 +30,16 @@ def _model_has_weights(path: Path) -> bool:
     return any((path / name).is_file() for name in candidates)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--model", type=Path,
+        default=Path(os.environ.get("GRPO_MODEL_PATH", DEFAULT_MODEL)),
+        help="complete Qwen3.5-9B SFT model (default: outputs/models/sft-full)",
+    )
     parser.add_argument("--train-data", type=Path, default=DEFAULT_TRAIN_DATA)
     parser.add_argument("--val-data", type=Path, default=DEFAULT_VAL_DATA)
-    parser.add_argument("--env-url", default="http://127.0.0.1:5700")
+    parser.add_argument("--env-url", default=os.environ.get("SHOPSIM_BASE_URL", "http://127.0.0.1:5700"))
     parser.add_argument("--output", type=Path, default=Path("outputs/models/grpo"))
     parser.add_argument(
         "--logger",
@@ -44,13 +48,36 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--experiment-name", default="shopping-agent-grpo")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--dry-run", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="print command; no runtime checks or training")
+    mode.add_argument("--check-only", action="store_true", help="check installed runtime and data without training")
     parser.add_argument(
         "hydra_overrides",
         nargs=argparse.REMAINDER,
         help="additional veRL Hydra overrides after --",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def hydra_overrides(args: argparse.Namespace) -> list[str]:
+    logger = "[console,swanlab]" if args.logger == "swanlab" else "[console]"
+    extra = list(args.hydra_overrides)
+    if extra[:1] == ["--"]:
+        extra = extra[1:]
+    paths = {
+        "actor_rollout_ref.model.path": "--model",
+        "data.train_files": "--train-data",
+        "data.val_files": "--val-data",
+        "trainer.default_local_dir": "--output",
+    }
+    for item in extra:
+        if item.startswith("--"):
+            raise SystemExit("only Hydra key=value overrides are accepted after --")
+        key = item.split("=", 1)[0].lstrip("+~")
+        for field, option in paths.items():
+            if key == field or field.startswith(key + "."):
+                raise SystemExit(f"set {field} using {option}, so preflight and training use the same path")
+    return [f"trainer.logger={logger}", f"trainer.experiment_name={args.experiment_name}", *extra]
 
 
 def _validated_path(path: Path, description: str) -> Path:
@@ -82,9 +109,20 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
         raise SystemExit("--logger swanlab requires SWANLAB_API_KEY")
 
     environment = dict(os.environ)
+    import_paths = [str(ROOT / "src")]
+    if environment.get("VERL_ROOT"):
+        verl_root = _validated_path(Path(environment["VERL_ROOT"]), "veRL checkout")
+        if not (verl_root / "verl/__init__.py").is_file():
+            raise SystemExit("VERL_ROOT must point to the checkout containing verl/__init__.py")
+        import_paths.append(str(verl_root))
+        environment["VERL_ROOT"] = str(verl_root)
+    if environment.get("PYTHONPATH"):
+        import_paths.append(environment["PYTHONPATH"])
     environment.update(
         {
-            "PYTHONPATH": str(ROOT / "src"),
+            "PYTHONPATH": os.pathsep.join(import_paths),
+            "PYTHONUNBUFFERED": "1",
+            "RAY_ADDRESS": "local",
             "SHOPPING_GRPO_ROOT": str(ROOT),
             "SHOPPING_ENVIRONMENT_VERSION": "shopsimulator-environment-v2.1",
             "SHOPPING_ENV_MANIFEST": str(DEFAULT_MANIFEST),
@@ -99,6 +137,7 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
             "SHOPPING_AGENT_LOOP_CONFIG": str(DEFAULT_AGENT_CONFIG),
             "SHOPPING_TOOL_CONFIG": str(DEFAULT_TOOL_CONFIG),
             "GRPO_CONFIG_NAME": config.stem,
+            "GRPO_CONFIG_DIR": str(config.parent),
         }
     )
     if args.logger == "swanlab":
@@ -108,28 +147,37 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
                 "SWANLAB_LOG_DIR": str(output / "swanlab"),
             }
         )
-    logger_override = (
-        "trainer.logger=[console,swanlab]"
-        if args.logger == "swanlab"
-        else "trainer.logger=[console]"
-    )
-    overrides = [
-        logger_override,
-        f"trainer.experiment_name={args.experiment_name}",
-    ]
-    extra = list(args.hydra_overrides)
-    if extra[:1] == ["--"]:
-        extra = extra[1:]
     command = [
         sys.executable,
         "-m",
         "verl.trainer.main_ppo",
         f"--config-path={config.parent}",
         f"--config-name={config.stem}",
-        *overrides,
-        *extra,
+        *hydra_overrides(args),
     ]
     return command, environment
+
+
+def run_logged(command, environment, log) -> int:
+    """Stream merged stdout/stderr to the terminal and the run's train.log."""
+    with subprocess.Popen(
+        command, cwd=ROOT, env=environment, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1,
+    ) as process:
+        try:
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                log.write(line)
+                log.flush()
+            return process.wait()
+        except KeyboardInterrupt:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise
 
 
 def main() -> None:
@@ -144,21 +192,28 @@ def main() -> None:
         "output": environment["GRPO_OUTPUT_DIR"],
         "logger": args.logger,
         "config": str(args.config.resolve()),
+        "python": sys.executable,
+        "verl_root": environment.get("VERL_ROOT", "installed in selected Python environment"),
+        "log": str(Path(environment["GRPO_OUTPUT_DIR"]) / "train.log"),
     }
     print(json.dumps(audit, ensure_ascii=False, indent=2))
     if args.dry_run:
         return
-    Path(environment["GRPO_OUTPUT_DIR"]).mkdir(parents=True, exist_ok=True)
     preflight = [
         sys.executable,
         str(ROOT / "scripts/check_grpo_runtime.py"),
-        *overrides,
-        *extra,
+        *hydra_overrides(args),
     ]
     preflight_status = subprocess.call(preflight, cwd=ROOT, env=environment)
-    if preflight_status:
+    if preflight_status or args.check_only:
         raise SystemExit(preflight_status)
-    raise SystemExit(subprocess.call(command, cwd=ROOT, env=environment))
+    output = Path(environment["GRPO_OUTPUT_DIR"])
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "launch.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with (output / "train.log").open("w", encoding="utf-8") as log:
+        log.write(json.dumps(audit, ensure_ascii=False, indent=2) + "\n")
+        log.flush()
+        raise SystemExit(run_logged(command, environment, log))
 
 
 if __name__ == "__main__":

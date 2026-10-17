@@ -1,27 +1,20 @@
 #!/usr/bin/env python3
-"""在加载模型前拒绝污染或版本不匹配的 GRPO 环境。"""
+"""Check the selected veRL environment and Shopping contract before loading weights."""
 
 from __future__ import annotations
 
 import json
+import importlib
+import importlib.util
+import inspect
 import math
 import os
 import sys
-from importlib.metadata import PackageNotFoundError, distribution, version
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 
-EXPECTED_VERSIONS = {
-    "verl": "0.8.0",
-    "vllm": "0.25.1",
-    "torch": "2.11.0",
-    "transformers": "5.15.0.dev0",
-    "ray": "2.56.1",
-    "tensordict": "0.10.0",
-    "numpy": "2.2.6",
-    "swanlab": "0.9.1",
-}
-EXPECTED_TRANSFORMERS_REVISION = "7ea2320c76117e6742364808a666ef6f2fb40a67"
+REQUIRED_PACKAGES = ("verl", "vllm", "torch", "transformers", "ray", "tensordict", "numpy", "peft", "pyarrow")
 PATCH_MARKER = "SHOPPING_GRPO_DYNAMIC_SAMPLING_PATCH_V3"
 MAX_SAFE_RESPONSE_LENGTH = 20480
 MAX_SAFE_SEQUENCE_LENGTH = 24576
@@ -134,31 +127,108 @@ def compose_runtime_config(overrides):
         raise SystemExit(f"cannot parse GRPO config before preflight: {exc}") from exc
 
     GlobalHydra.instance().clear()
-    config_dir = Path(__file__).resolve().parents[1] / "configs"
+    config_dir = Path(os.environ.get("GRPO_CONFIG_DIR", Path(__file__).resolve().parents[1] / "configs")).resolve()
     config_name = os.environ.get("GRPO_CONFIG_NAME", "grpo")
     with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
         return compose(config_name=config_name, overrides=list(overrides))
 
 
-def validate_transformers_revision():
-    """The Qwen3.5 runtime uses one pinned upstream Transformers revision."""
-    dist = distribution("transformers")
-    direct_url = Path(dist.locate_file("transformers-5.15.0.dev0.dist-info/direct_url.json"))
-    if not direct_url.is_file():
-        raise SystemExit(
-            "cannot verify pinned Transformers revision: direct_url.json is missing"
-        )
-    try:
-        metadata = json.loads(direct_url.read_text(encoding="utf-8"))
-        revision = metadata["vcs_info"]["commit_id"]
-    except (OSError, KeyError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"invalid Transformers direct_url.json: {exc}") from exc
-    if revision != EXPECTED_TRANSFORMERS_REVISION:
-        raise SystemExit(
-            "incompatible Transformers revision: expected "
-            f"{EXPECTED_TRANSFORMERS_REVISION}, got {revision}"
-        )
-    print(f"pinned Transformers revision preflight passed: {revision}")
+def validate_installed_dependencies(config):
+    """Keep the working vendor stack; API checks below establish compatibility."""
+    if sys.version_info < (3, 10):
+        raise SystemExit("GRPO requires Python >=3.10 in the selected environment")
+    packages = list(REQUIRED_PACKAGES)
+    if "swanlab" in config.trainer.get("logger", []):
+        packages.append("swanlab")
+    if config.trainer.device == "npu":
+        packages.extend(("torch-npu", "vllm-ascend"))
+    installed = {}
+    for package in packages:
+        try:
+            installed[package] = version(package)
+        except PackageNotFoundError as exc:
+            raise SystemExit(f"missing GRPO dependency in {sys.executable}: {package}") from exc
+    if installed["verl"].split("+", 1)[0] != "0.8.0":
+        raise SystemExit(f"Shopping integration requires veRL 0.8.0 APIs; found {installed['verl']}")
+    return installed
+
+
+def validate_device(config, torch):
+    device = str(config.trainer.device)
+    if device not in ("npu", "cuda"):
+        raise SystemExit(f"unsupported training device: {device}")
+    backend = getattr(torch, device, None)
+    if backend is None or not backend.is_available():
+        raise SystemExit(f"{device.upper()} is unavailable in the selected Python environment")
+    requested = int(config.trainer.n_gpus_per_node)
+    available = backend.device_count()
+    if requested <= 0 or available < requested:
+        raise SystemExit(f"requested {requested} {device} devices, but only {available} are visible")
+    if int(config.trainer.nnodes) != 1:
+        raise SystemExit("this launcher requires trainer.nnodes=1")
+    if str(config.ray_kwargs.ray_init.get("address")) != "local":
+        raise SystemExit("single-node GRPO requires ray_kwargs.ray_init.address=local")
+    if device == "npu":
+        resources = config.ray_kwargs.ray_init.get("resources", {})
+        if int(resources.get("NPU", 0)) != requested:
+            raise SystemExit("Ray NPU resources must equal trainer.n_gpus_per_node")
+        if not torch.distributed.is_backend_available("hccl"):
+            raise SystemExit("HCCL is unavailable; activate the working torch_npu environment")
+    print(f"GRPO device preflight passed: {device}, visible={available}, requested={requested}, nodes=1")
+
+
+def validate_data_isolation(config):
+    import pyarrow.parquet as parquet
+
+    def task_ids(paths):
+        if isinstance(paths, (str, Path)):
+            paths = [paths]
+        ids = set()
+        for path in paths:
+            try:
+                rows = parquet.read_table(str(path), columns=["extra_info"]).to_pylist()
+                current = [int(row["extra_info"]["task_id"]) for row in rows]
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                raise SystemExit(f"invalid GRPO task IDs in {path}: {exc}") from exc
+            if len(set(current)) != len(current) or ids.intersection(current):
+                raise SystemExit(f"duplicate GRPO task IDs in {path}")
+            ids.update(current)
+        if not ids:
+            raise SystemExit("GRPO dataset is empty")
+        return ids
+
+    train = task_ids(config.data.train_files)
+    validation = task_ids(config.data.val_files)
+    evaluation_path = Path(__file__).resolve().parents[1] / "data/evaluation/tasks.jsonl"
+    evaluation = {
+        int(json.loads(line)["task_id"])
+        for line in evaluation_path.read_text(encoding="utf-8").splitlines() if line.strip()
+    }
+    if train & validation:
+        raise SystemExit("GRPO training and validation task IDs overlap")
+    if (train | validation) & evaluation:
+        raise SystemExit("GRPO data overlaps frozen data/evaluation/tasks.jsonl")
+    print(f"GRPO data isolation passed: train={len(train)}, validation={len(validation)}, evaluation={len(evaluation)}")
+
+
+def validate_launch_paths(config):
+    """Custom Hydra configs must honor the paths checked by the CLI launcher."""
+    fields = (
+        ("GRPO_MODEL_PATH", config.actor_rollout_ref.model.path),
+        ("GRPO_TRAIN_FILE", config.data.train_files),
+        ("GRPO_VAL_FILE", config.data.val_files),
+        ("GRPO_OUTPUT_DIR", config.trainer.default_local_dir),
+    )
+    for name, actual in fields:
+        expected = os.environ.get(name)
+        if not expected:
+            raise SystemExit(f"{name} is missing; launch with scripts/grpo.sh")
+        if not isinstance(actual, str):
+            if len(actual) != 1:
+                raise SystemExit(f"config must use the launcher-selected {name}")
+            actual = actual[0]
+        if Path(actual).expanduser().resolve() != Path(expected).expanduser().resolve():
+            raise SystemExit(f"config path disagrees with {name}; use the launcher's path options")
 
 
 def validate_dynamic_sampling(config, verl_source: Path, installed):
@@ -166,7 +236,7 @@ def validate_dynamic_sampling(config, verl_source: Path, installed):
     if not bool(dynamic_config.get("enable", False)):
         return
 
-    if installed.get("verl") != "0.8.0":
+    if installed.get("verl", "").split("+", 1)[0] != "0.8.0":
         raise SystemExit(
             f"shopping dynamic sampling requires verl==0.8.0, got {installed.get('verl')}"
         )
@@ -176,7 +246,9 @@ def validate_dynamic_sampling(config, verl_source: Path, installed):
     if PATCH_MARKER not in ray_trainer.read_text(encoding="utf-8"):
         raise SystemExit(
             "shopping dynamic sampling is enabled but the pinned veRL patch marker is missing; "
-            "run scripts/apply_verl_dynamic_sampling_patch.py first"
+            f"run {sys.executable} scripts/apply_verl_dynamic_sampling_patch.py with the same "
+            "PYTHONPATH/VERL_ROOT selection first. Unknown fork sources require a reviewed patch port; "
+            "do not force the patch or silently disable dynamic sampling"
         )
 
     try:
@@ -328,6 +400,39 @@ def ppo_gradient_accumulation_steps(mini_batch_size: int, micro_batch_size: int)
     return mini // micro
 
 
+def validate_parallel_batches(config):
+    """veRL expands prompt batches by rollout.n before splitting across DP ranks."""
+    actor = config.actor_rollout_ref.actor
+    rollout = config.actor_rollout_ref.rollout
+    world = int(config.trainer.n_gpus_per_node) * int(config.trainer.nnodes)
+    tp = int(rollout.tensor_model_parallel_size)
+    if world <= 0 or tp <= 0 or world % tp:
+        raise SystemExit("rollout tensor parallel size must divide the total device count")
+    if actor.strategy not in ("fsdp", "fsdp2"):
+        raise SystemExit("this Shopping recipe requires an FSDP actor; a Megatron strategy needs a separate reviewed recipe")
+    sp = int(actor.get("ulysses_sequence_parallel_size", 1))
+    nested_sp = int(actor.fsdp_config.get("ulysses_sequence_parallel_size", 1))
+    if sp != 1 or nested_sp != 1:
+        raise SystemExit("this Qwen3.5 Shopping recipe requires sequence parallel size 1")
+    replicas = int(rollout.get("data_parallel_size", 1))
+    pp = int(rollout.get("pipeline_model_parallel_size", 1))
+    if replicas != 1 or pp != 1:
+        raise SystemExit("this recipe uses TP-only rollout replicas; rollout DP and PP must be 1")
+    n = int(rollout.n)
+    prompts = int(config.data.train_batch_size)
+    mini = int(actor.ppo_mini_batch_size)
+    micro = int(actor.ppo_micro_batch_size_per_gpu)
+    if min(n, prompts, mini, micro) <= 0 or mini > prompts or prompts % mini:
+        raise SystemExit("positive train batch must be divisible by PPO mini batch")
+    global_micro = world * micro
+    if (prompts * n) % global_micro or (mini * n) % global_micro:
+        raise SystemExit("expanded prompt/mini batches (batch * rollout.n) must be divisible by devices * micro batch")
+    accumulation = ppo_gradient_accumulation_steps(mini * n // world, micro)
+    print(f"GRPO parallelism: actor DP={world}, rollout TP={tp}, rollout replicas={world // tp}, "
+          f"global trajectories={prompts * n}, local gradient accumulation={accumulation}")
+    return accumulation
+
+
 def validate_training_memory_budget(config):
     prompt_length = int(config.data.max_prompt_length)
     response_length = int(config.data.max_response_length)
@@ -368,13 +473,7 @@ def validate_training_memory_budget(config):
         )
     actor_micro_batch_size = int(actor.ppo_micro_batch_size_per_gpu)
     actor_mini_batch_size = int(actor.ppo_mini_batch_size)
-    try:
-        gradient_accumulation_steps = ppo_gradient_accumulation_steps(
-            actor_mini_batch_size,
-            actor_micro_batch_size,
-        )
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
+    gradient_accumulation_steps = validate_parallel_batches(config)
     if bool(rollout.log_prob_use_dynamic_bsz):
         raise SystemExit(
             "rollout.log_prob_use_dynamic_bsz must be false so "
@@ -412,7 +511,14 @@ def validate_training_memory_budget(config):
 
 
 def main():
+    # Register NPU before importing veRL: veRL caches its device detection.
+    import torch
+    if importlib.util.find_spec("torch_npu") is not None:
+        importlib.import_module("torch_npu")
     config = compose_runtime_config(sys.argv[1:])
+    validate_launch_paths(config)
+    installed = validate_installed_dependencies(config)
+    validate_device(config, torch)
     validate_environment_contract()
     required_paths = {
         "GRPO_TRAIN_FILE": os.environ.get("GRPO_TRAIN_FILE"),
@@ -421,34 +527,20 @@ def main():
     missing = [name for name, value in required_paths.items() if not value or not Path(value).is_file()]
     if missing:
         raise SystemExit("missing GRPO parquet file(s): " + ", ".join(missing))
+    validate_data_isolation(config)
     validate_training_memory_budget(config)
     validate_trace(config)
 
-    if sys.version_info[:2] != (3, 12):
-        raise SystemExit(f"incompatible Python: expected 3.12, got {sys.version.split()[0]}")
-
-    installed = {}
-    for package, expected in EXPECTED_VERSIONS.items():
-        try:
-            installed[package] = version(package)
-        except PackageNotFoundError as exc:
-            raise SystemExit(f"missing GRPO dependency: {package}=={expected}") from exc
-        if installed[package].split("+", 1)[0] != expected:
-            raise SystemExit(
-                f"incompatible GRPO dependency: expected {package}=={expected}, got {installed[package]}"
-            )
-    validate_transformers_revision()
-
     try:
-        import torch
         import verl
+        import vllm
+        from transformers import AutoConfig
         from verl.experimental.agent_loop.tool_parser import ToolParser
         from verl.experimental.agent_loop.tool_agent_loop import AgentState, ToolAgentLoop
         from shopping_grpo.training.grpo.adapter.agent_loop import ShoppingToolAgentLoop
         from shopping_grpo.training.grpo.adapter.tools import ShopSimulatorTool
         from shopping_grpo.training.grpo.compat import install_torch_padding_fallback
         from verl.tools.base_tool import BaseTool
-        from verl.utils.tracking import Tracking
     except ImportError as exc:
         raise SystemExit(
             "incompatible veRL 0.8 install: required AgentLoop/Tool APIs are unavailable; "
@@ -456,8 +548,19 @@ def main():
         ) from exc
 
     verl_source = Path(verl.__file__).resolve()
-    if not torch.cuda.is_available():
-        raise SystemExit("CUDA is unavailable in the GRPO environment")
+    if os.environ.get("VERL_ROOT"):
+        expected_source = Path(os.environ["VERL_ROOT"]).expanduser().resolve() / "verl/__init__.py"
+        if verl_source != expected_source:
+            raise SystemExit(f"VERL_ROOT selection mismatch: imported {verl_source}, expected {expected_source}")
+    if config.trainer.device == "npu":
+        importlib.import_module("vllm_ascend")
+    try:
+        model_config = AutoConfig.from_pretrained(
+            config.actor_rollout_ref.model.path, trust_remote_code=True, local_files_only=True,
+        )
+    except (OSError, ValueError, KeyError) as exc:
+        raise SystemExit(f"selected Transformers cannot load the local model config: {exc}") from exc
+    print(f"GRPO model config: {model_config.model_type}, architectures={model_config.architectures}")
     if (
         not issubclass(ShoppingToolAgentLoop, ToolAgentLoop)
         or not issubclass(ShopSimulatorTool, BaseTool)
@@ -465,17 +568,32 @@ def main():
         or not hasattr(ToolAgentLoop, "_handle_processing_tools_state")
     ):
         raise SystemExit("incompatible veRL ToolAgentLoop lifecycle API")
+    try:
+        inspect.signature(ToolAgentLoop._handle_generating_state).bind(
+            None, None, {}, ignore_termination=False,
+        )
+        inspect.signature(ToolAgentLoop._call_tool).bind(None, None, {}, None)
+        if not callable(ToolAgentLoop.run):
+            raise TypeError("ToolAgentLoop.run is not callable")
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise SystemExit(f"incompatible veRL ToolAgentLoop method signatures: {exc}") from exc
     if "qwen3_coder" not in ToolParser._registry:
         raise SystemExit("veRL 0.8 built-in qwen3_coder parser is unavailable")
-    if "swanlab" not in Tracking.supported_backend:
-        raise SystemExit("veRL 0.8 SwanLab tracking backend is unavailable")
+    if "swanlab" in config.trainer.get("logger", []):
+        from verl.utils.tracking import Tracking
+        if "swanlab" not in Tracking.supported_backend:
+            raise SystemExit("veRL SwanLab tracking backend is unavailable")
     validate_dynamic_sampling(config, verl_source, installed)
     validate_swanlab_tracking(config)
-    install_torch_padding_fallback()
+    try:
+        install_torch_padding_fallback()
+    except (ImportError, AttributeError) as exc:
+        raise SystemExit(f"selected veRL fork lacks the required Shopping runtime hook APIs: {exc}") from exc
     print(
         "GRPO runtime preflight passed: "
         + ", ".join(f"{name}={value}" for name, value in installed.items())
         + f", source={verl_source}"
+        + f", vllm_source={vllm.__file__}, python={sys.executable}"
     )
 
 
