@@ -173,6 +173,25 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         self.assertIs(type(raw["resources"]["NPU"]), int)
         self.assertIn("GRPO Ray init preflight passed", self.stdout.getvalue())
 
+    def test_npu_recipe_requires_explicit_verl_device_binding(self):
+        field = "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"
+        for value in (None, "", "0", "false"):
+            with self.subTest(value=value):
+                config = self.ray_config()
+                env_vars = config.ray_kwargs.ray_init.runtime_env.env_vars
+                if value is None:
+                    del env_vars[field]
+                else:
+                    env_vars[field] = value
+                with self.assertRaisesRegex(SystemExit, "NPU GRPO requires.*NOSET_ASCEND"):
+                    runtime.validate_ray_init(config)
+
+    def test_cuda_config_does_not_require_npu_binding_flag(self):
+        config = self.ray_config()
+        config.trainer.device = "cuda"
+        del config.ray_kwargs.ray_init.runtime_env.env_vars.RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES
+        runtime.validate_ray_init(config)
+
     def test_resource_interpolation_is_rejected_even_when_attribute_access_resolves_it(self):
         config = self.ray_config()
         config.ray_kwargs.ray_init.resources.NPU = "${trainer.n_gpus_per_node}"

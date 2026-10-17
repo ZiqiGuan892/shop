@@ -220,8 +220,15 @@ def validate_ray_init(config):
             "Ray worker PYTHONPATH must equal the launcher's concrete PYTHONPATH; "
             "launch with scripts/grpo.sh and use shell PYTHONPATH or VERL_ROOT for additional imports"
         )
+    npu_binding_flag = "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"
+    if config.trainer.device == "npu" and env_vars.get(npu_binding_flag) != "1":
+        raise SystemExit(
+            f"NPU GRPO requires ray_kwargs.ray_init.runtime_env.env_vars.{npu_binding_flag}=\"1\"; "
+            "veRL must explicitly select each Ray-assigned NPU while preserving the platform mask"
+        )
     print("GRPO Ray init preflight passed: " + json.dumps({
         "resources": resources, "worker_pythonpath_verified": True,
+        "npu_binding": "verl_ray_assigned_device" if config.trainer.device == "npu" else None,
     }, sort_keys=True))
 
 
@@ -637,6 +644,11 @@ def main():
             raise SystemExit(f"VERL_ROOT selection mismatch: imported {verl_source}, expected {expected_source}")
     if config.trainer.device == "npu":
         importlib.import_module("vllm_ascend")
+        try:
+            from verl.single_controller.base.worker import Worker
+            inspect.signature(Worker._setup_env_cuda_visible_devices).bind(None)
+        except (ImportError, AttributeError, TypeError, ValueError) as exc:
+            raise SystemExit(f"selected veRL fork lacks the required native NPU worker binding API: {exc}") from exc
     try:
         model_config = AutoConfig.from_pretrained(
             config.actor_rollout_ref.model.path, trust_remote_code=True, local_files_only=True,

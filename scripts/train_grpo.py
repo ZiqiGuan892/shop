@@ -133,6 +133,15 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
         raise SystemExit("--logger swanlab requires SWANLAB_API_KEY")
 
     environment = dict(os.environ)
+    # Ray/veRL creates its own worker ranks and rendezvous. Do not inherit a
+    # surrounding torchrun job's identity; retain the platform's device masks.
+    for name in (
+        "RANK", "LOCAL_RANK", "WORLD_SIZE", "LOCAL_WORLD_SIZE",
+        "NODE_RANK", "MASTER_ADDR", "MASTER_PORT",
+    ):
+        environment.pop(name, None)
+    # Show each worker's device binding even when only numeric IDs differ.
+    environment.setdefault("RAY_DEDUP_LOGS", "0")
     import_paths = [str(ROOT / "src")]
     if environment.get("VERL_ROOT"):
         verl_root = _validated_path(Path(environment["VERL_ROOT"]), "veRL checkout")

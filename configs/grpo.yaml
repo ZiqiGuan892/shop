@@ -145,6 +145,8 @@ ray_kwargs:
         # scripts/train_grpo.py supplies the concrete worker import path.
         PYTHONPATH: ""
         PYTHONUNBUFFERED: "1"
+        # Keep the platform mask; veRL binds each worker to its Ray-assigned NPU.
+        RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: "1"
       worker_process_setup_hook: shopping_grpo.training.grpo.compat.install_torch_padding_fallback
 
 trainer:

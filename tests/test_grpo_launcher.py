@@ -85,6 +85,34 @@ class GRPOLauncherTest(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "checkout containing"):
                 train_grpo.build_command(self.args())
 
+    def test_stale_rank_environment_is_removed_only_from_child_and_device_masks_are_preserved(self):
+        stale = {
+            "RANK": "5", "LOCAL_RANK": "5", "WORLD_SIZE": "16", "LOCAL_WORLD_SIZE": "8",
+            "NODE_RANK": "1", "MASTER_ADDR": "old-coordinator", "MASTER_PORT": "12345",
+        }
+        masks = {
+            "ASCEND_VISIBLE_DEVICES": "10,11,12,13,14,15,8,9",
+            "ASCEND_RT_VISIBLE_DEVICES": "7,6,5,4,3,2,1,0",
+        }
+        with patch.dict(os.environ, {**stale, **masks}):
+            parent_environment = dict(os.environ)
+            _, child_environment = train_grpo.build_command(self.args())
+            self.assertEqual(dict(os.environ), parent_environment)
+        for name in stale:
+            self.assertNotIn(name, child_environment)
+        for name, value in masks.items():
+            self.assertEqual(child_environment[name], value)
+
+    def test_worker_binding_logs_are_not_deduplicated_unless_explicitly_requested(self):
+        with patch.dict(os.environ):
+            os.environ.pop("RAY_DEDUP_LOGS", None)
+            _, child_environment = train_grpo.build_command(self.args())
+            self.assertEqual(child_environment["RAY_DEDUP_LOGS"], "0")
+            self.assertNotIn("RAY_DEDUP_LOGS", os.environ)
+            os.environ["RAY_DEDUP_LOGS"] = "1"
+            _, child_environment = train_grpo.build_command(self.args())
+            self.assertEqual(child_environment["RAY_DEDUP_LOGS"], "1")
+
     def test_ray_receives_literal_resources_and_exact_worker_import_path(self):
         from scripts.check_grpo_runtime import validate_ray_init
 
@@ -112,6 +140,10 @@ class GRPOLauncherTest(unittest.TestCase):
                 self.assertEqual(raw["resources"]["NPU"], 8)
                 self.assertIs(type(raw["resources"]["NPU"]), int)
                 self.assertEqual(raw["runtime_env"]["env_vars"]["PYTHONUNBUFFERED"], "1")
+                self.assertEqual(
+                    raw["runtime_env"]["env_vars"]["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"],
+                    "1",
+                )
                 self.assertEqual(
                     raw["runtime_env"]["worker_process_setup_hook"],
                     "shopping_grpo.training.grpo.compat.install_torch_padding_fallback",

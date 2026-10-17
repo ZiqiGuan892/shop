@@ -89,6 +89,29 @@ job does not establish that this Shopping AgentLoop, Qwen3.5 FSDP training,
 LoRA weight synchronization and dynamic sampler are supported in a custom fork.
 Passing preflight is necessary but is not an end-to-end NPU training validation.
 
+The NPU recipe sets `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES="1"`
+in Ray's worker runtime environment. Ray then leaves the runtime device mask
+alone, and veRL's native worker setup explicitly selects the NPU assigned by
+Ray. The launcher preserves the platform's `ASCEND_VISIBLE_DEVICES` and any
+existing `ASCEND_RT_VISIBLE_DEVICES`; do not copy physical card IDs from the
+platform mask into `LOCAL_RANK`. It removes inherited torchrun rank and
+rendezvous variables from the child environment so Ray/veRL can establish
+their own ranks. See the [Ray NPU manager](https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/npu.py)
+and [veRL worker setup](https://github.com/volcengine/verl/blob/main/verl/single_controller/base/worker.py).
+
+Before each NPU worker loads its model, `GRPO NPU worker binding:` logs the
+PID, global rank, Ray-assigned NPU ID, local rank, current logical device and
+both visibility masks. Ray log deduplication defaults to off so these lines
+remain visible; an explicit shell `RAY_DEDUP_LOGS` setting is preserved.
+In this NOSET mode the assigned ID, local rank and
+current device must agree; a mismatch stops the worker before model loading.
+Global rank need not equal the device ID. The hook observes veRL's selection
+and does not choose another device. An HCCL error reporting the **same physical
+device ID for two ranks** indicates a binding conflict; `LOCAL_RANK=0` alone
+does not establish that conflict in other Ray visibility modes. `--check-only`
+checks the launch policy and worker API, while actual worker binding is checked
+only when training starts.
+
 `configs/grpo.yaml` explicitly sets `trainer.use_v1: false`, overriding the
 server's inherited V1 default. In the
 [upstream 0.9 launcher](https://github.com/volcengine/verl/blob/v0.9.0/verl/trainer/main_ppo.py),
