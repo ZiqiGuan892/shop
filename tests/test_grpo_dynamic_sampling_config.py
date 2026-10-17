@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import tempfile
+import hashlib
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from omegaconf import OmegaConf
+from scripts import check_grpo_runtime as runtime
 
 from scripts.check_grpo_runtime import (
     PATCH_MARKER,
@@ -76,7 +81,8 @@ class DynamicSamplingConfigTest(unittest.TestCase):
         self.assertTrue(config.actor_rollout_ref.rollout.calculate_log_probs)
 
     def test_enabled_config_requires_installed_patch_marker(self):
-        config = compose_runtime_config(["shopping_dynamic_sampling.enable=true"])
+        # Patch safety checks need no installed trainer or model dependencies.
+        config = OmegaConf.load(Path(__file__).resolve().parents[1] / "configs/grpo.yaml")
         with tempfile.TemporaryDirectory() as temp_dir:
             verl_source = Path(temp_dir) / "verl" / "__init__.py"
             trainer_source = verl_source.parent / "trainer" / "ppo" / "ray_trainer.py"
@@ -84,10 +90,17 @@ class DynamicSamplingConfigTest(unittest.TestCase):
             verl_source.write_text("", encoding="utf-8")
             trainer_source.write_text("# unpatched\n", encoding="utf-8")
             with self.assertRaisesRegex(SystemExit, "patch marker is missing"):
-                validate_dynamic_sampling(config, verl_source, {"verl": "0.8.0"})
+                validate_dynamic_sampling(config, verl_source, {"verl": "0.9.0.dev"})
 
             trainer_source.write_text(f"# {PATCH_MARKER}\n", encoding="utf-8")
-            validate_dynamic_sampling(config, verl_source, {"verl": "0.8.0"})
+            with self.assertRaisesRegex(SystemExit, "trainer source is unreviewed"):
+                validate_dynamic_sampling(config, verl_source, {"verl": "0.9.0.dev"})
+            fixture_hash = hashlib.sha256(trainer_source.read_bytes()).hexdigest()
+            with mock.patch.object(runtime, "EXPECTED_PATCHED_SHA256", fixture_hash):
+                validate_dynamic_sampling(config, verl_source, {"verl": "0.9.0.dev"})
+                validate_dynamic_sampling(config, verl_source, {"verl": "0.9.0.dev0+ascend"})
+                with self.assertRaisesRegex(SystemExit, "requires veRL 0.9.0.dev source"):
+                    validate_dynamic_sampling(config, verl_source, {"verl": "0.8.0"})
 
 
 if __name__ == "__main__":  # pragma: no cover

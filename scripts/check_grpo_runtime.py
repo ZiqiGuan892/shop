@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import importlib
 import importlib.util
 import inspect
@@ -15,7 +16,7 @@ from pathlib import Path
 
 
 REQUIRED_PACKAGES = ("verl", "vllm", "torch", "transformers", "ray", "tensordict", "numpy", "peft", "pyarrow")
-PATCH_MARKER = "SHOPPING_GRPO_DYNAMIC_SAMPLING_PATCH_V3"
+from shopping_grpo.training.grpo.patch_contract import EXPECTED_PATCHED_SHA256, PATCH_MARKER
 MAX_SAFE_RESPONSE_LENGTH = 20480
 MAX_SAFE_SEQUENCE_LENGTH = 24576
 CURRENT_RUNTIME_FILES = {
@@ -160,6 +161,17 @@ def validate_installed_dependencies(config):
     return installed
 
 
+def validate_trainer_backend(config):
+    # Newer 0.9 forks may default to V1, which bypasses RayPPOTrainer and its
+    # Shopping sampling/TRACE hooks. A matching version/hash cannot prove V1.
+    if config.trainer.get("use_v1", False):
+        raise SystemExit(
+            "trainer.use_v1=true selects a different veRL trainer; the Shopping integration "
+            "currently requires the reviewed RayPPOTrainer path. Provide the selected source's "
+            "trainer/main_ppo.py, main_ppo_v0.py (if present), and trainer/config/ for port review."
+        )
+
+
 def validate_device(config, torch):
     device = str(config.trainer.device)
     if device not in ("npu", "cuda"):
@@ -243,19 +255,29 @@ def validate_dynamic_sampling(config, verl_source: Path, installed):
     if not bool(dynamic_config.get("enable", False)):
         return
 
-    if installed.get("verl", "").split("+", 1)[0] != "0.8.0":
-        raise SystemExit(
-            f"shopping dynamic sampling requires verl==0.8.0, got {installed.get('verl')}"
-        )
+    from shopping_grpo.training.grpo.verl_source import validate_verl_version
+
+    try:
+        validate_verl_version(installed.get("verl", ""))
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
     ray_trainer = verl_source.parent / "trainer" / "ppo" / "ray_trainer.py"
     if not ray_trainer.is_file():
         raise SystemExit(f"cannot locate installed RayPPOTrainer source: {ray_trainer}")
     if PATCH_MARKER not in ray_trainer.read_text(encoding="utf-8"):
         raise SystemExit(
-            "shopping dynamic sampling is enabled but the pinned veRL patch marker is missing; "
-            f"run {sys.executable} scripts/apply_verl_dynamic_sampling_patch.py with the same "
-            "PYTHONPATH/VERL_ROOT selection first. Unknown fork sources require a reviewed patch port; "
-            "do not force the patch or silently disable dynamic sampling"
+            "shopping dynamic sampling is enabled but the reviewed patch marker is missing; "
+            f"selected veRL={installed.get('verl')}, source={ray_trainer}. "
+            "The bundled patch was reviewed against an earlier trainer source; a 0.9.0.dev vendor "
+            "fork requires a source comparison and patch port before training. Provide this "
+            "ray_trainer.py for review; do not force the patch or silently disable dynamic sampling."
+        )
+    trainer_hash = hashlib.sha256(ray_trainer.read_bytes()).hexdigest()
+    if trainer_hash != EXPECTED_PATCHED_SHA256:
+        raise SystemExit(
+            "shopping dynamic-sampling patch marker is present but trainer source is unreviewed: "
+            f"{ray_trainer}, sha256={trainer_hash}. "
+            "A version string or marker alone does not verify the 0.9.0.dev patch port."
         )
 
     try:
@@ -525,6 +547,7 @@ def main():
     config = compose_runtime_config(sys.argv[1:])
     validate_launch_paths(config)
     installed = validate_installed_dependencies(config)
+    validate_trainer_backend(config)
     validate_device(config, torch)
     validate_environment_contract()
     required_paths = {
@@ -550,7 +573,7 @@ def main():
         from verl.tools.base_tool import BaseTool
     except ImportError as exc:
         raise SystemExit(
-            "incompatible veRL 0.8 install: required AgentLoop/Tool APIs are unavailable; "
+            "incompatible veRL 0.9.0.dev source: required AgentLoop/Tool APIs are unavailable; "
             f"original error: {exc}"
         ) from exc
 
@@ -585,7 +608,7 @@ def main():
     except (AttributeError, TypeError, ValueError) as exc:
         raise SystemExit(f"incompatible veRL ToolAgentLoop method signatures: {exc}") from exc
     if "qwen3_coder" not in ToolParser._registry:
-        raise SystemExit("veRL 0.8 built-in qwen3_coder parser is unavailable")
+        raise SystemExit("selected veRL 0.9.0.dev source has no built-in qwen3_coder parser")
     if "swanlab" in config.trainer.get("logger", []):
         from verl.utils.tracking import Tracking
         if "swanlab" not in Tracking.supported_backend:

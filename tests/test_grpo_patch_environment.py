@@ -40,20 +40,22 @@ class GRPOPatchEnvironmentTest(unittest.TestCase):
 
     def test_resolves_external_editable_checkout_from_active_python(self):
         self.assertFalse(self.target.is_relative_to(patcher.PROJECT_ROOT / ".venv"))
-        self.assertEqual(self.resolve("0.8.0"), self.target.resolve())
+        self.assertEqual(self.resolve("0.9.0.dev"), self.target.resolve())
 
     def test_accepts_local_build_version_without_relaxing_public_version(self):
-        self.assertEqual(self.resolve("0.8.0+ascend.local"), self.target.resolve())
+        for version in ("0.9.0.dev", "0.9.0.dev0", "0.9.0.dev+ascend.local", "0.9.0.dev0+ascend"):
+            with self.subTest(version=version):
+                self.assertEqual(self.resolve(version), self.target.resolve())
 
     def test_rejects_other_public_versions(self):
-        for version in ("0.7.0", "0.8.1+ascend", "0.8.0rc1", "0.8.0.post1"):
-            with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, "requires veRL 0.8.0 APIs"):
+        for version in ("0.8.0", "0.9.0", "0.9.0rc1", "0.9.0.dev1", "0.10.0.dev"):
+            with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, "requires veRL 0.9.0.dev source"):
                 self.resolve(version)
 
     def test_missing_trainer_has_actionable_error(self):
         self.target.unlink()
         with self.assertRaisesRegex(RuntimeError, "installed ray_trainer.py does not exist"):
-            self.resolve("0.8.0+ascend")
+            self.resolve("0.9.0.dev+ascend")
 
     def test_unknown_fork_is_unchanged_without_invoking_patch_program(self):
         before = self.target.read_bytes()

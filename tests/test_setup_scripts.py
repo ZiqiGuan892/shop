@@ -209,12 +209,16 @@ INSTALLER
         self.assertEqual((self.shop / "data/items_eval_train.json").read_bytes(), self.products)
         self.assertEqual((self.training / "marker").read_text(), "keep existing NPU environment")
 
-    def test_full_setup_still_syncs_training_and_applies_patch(self):
+    def test_full_setup_syncs_dependencies_without_replacing_or_patching_verl(self):
         result = self.run_script("scripts/setup.sh")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.record.read_text()
         self.assertIn("<sync>", calls)
-        self.assertIn("<scripts/apply_verl_dynamic_sampling_patch.py>", calls)
+        self.assertNotIn("apply_verl_dynamic_sampling_patch.py", calls)
+        self.assertIn("veRL 0.9.0.dev", result.stdout)
+        self.assertIn("VERL_ROOT", result.stdout)
+        self.assertIn("bash scripts/grpo.sh --check-only", result.stdout)
+        self.assertEqual((self.training / "marker").read_text(), "keep existing NPU environment")
 
     def test_service_uses_simulator_python_and_captures_console(self):
         self.install_simulator()

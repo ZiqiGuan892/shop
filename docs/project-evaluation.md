@@ -175,7 +175,7 @@ LoRA 将可训练更新限制在低秩适配参数中，避免更新所有基座
 
 ### 5.1 在线交互和组内比较
 
-GRPO 从合并后的 SFT 模型开始，使用固定版本 `verl==0.8.0` 和 vLLM 生成在线轨迹。同一个任务默认生成 4 条 Rollout，每条轨迹都真正调用 ShopSimulator；环境终局 Reward v3 给出数值反馈。训练不启用独立的学习型 Reward Model，也不使用评测用 LLM Judge 的评分作为默认训练奖励。
+GRPO 从完整导出的 SFT 模型开始，当前运行入口要求服务器提供 veRL `0.9.0.dev` 源码，并通过 vLLM 生成在线轨迹。版本选择已更新，但服务器分支的接口及动态采样补丁仍需实际验证；不能把原有结果当作这一环境的复现结果。同一个任务默认生成 4 条 Rollout，每条轨迹都真正调用 ShopSimulator；环境终局 Reward v3 给出数值反馈。训练不启用独立的学习型 Reward Model，也不使用评测用 LLM Judge 的评分作为默认训练奖励。
 
 同题的不同轨迹互相构成比较基线。当前配置 `norm_adv_by_std_in_grpo=false`，因此应按组内奖励减均值理解基本优势，而不是默认套用“再除以组内标准差”的公式：
 
@@ -397,7 +397,7 @@ V4 Flash 的职责是从代码给出的候选约束中选择、去重和区分 h
 
 ### 9.1 运行资源
 
-项目训练主环境面向 Linux，主 Python 版本为 3.12，ShopSimulator 隔离环境为 Python 3.10。依赖中固定了 veRL 0.8.0、vLLM 0.25.1、Torch 2.11.0 和 Transformers 的特定提交。GPU、CUDA、tokenizer 模板和依赖版本都属于复现条件，不能仅凭“同名模型”保证相同结果。
+项目训练面向 Linux。当前 GRPO 入口复用 Python 3.10 及以上的服务器环境，要求外部提供 veRL `0.9.0.dev` 源码，不再从 PyPI 安装 veRL 0.8.0。可选的新环境依赖仍保留 vLLM 0.25.1、Torch 2.11.0 和 Transformers 特定提交；它们不是现有 NPU 环境必须重装的版本。ShopSimulator 单独使用 Python 3.10。设备后端、tokenizer 模板及实际源码版本都属于复现条件，不能仅凭“同名模型”保证相同结果。
 
 README 记录单张 NVIDIA RTX 6000 96 GB 的历史耗时：SFT 三个 epoch 约 3 小时，峰值显存约 89 GiB；GRPO 报告 checkpoint 100 步约 3–4 小时，完整 500 步约 14 小时。这些是既有记录中的量级参考，不是本次实测，也不是当前 1,192 行课程训练的成本承诺。
 

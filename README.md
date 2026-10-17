@@ -12,7 +12,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![Full SFT](https://img.shields.io/badge/Post--training-Full%20SFT-7B61FF)](docs/sft.md)
-[![veRL](https://img.shields.io/badge/veRL-0.8.0-0E8A16)](https://github.com/verl-project/verl)
+[![veRL](https://img.shields.io/badge/veRL-0.9.0.dev-0E8A16)](https://github.com/verl-project/verl)
 [![ShopSimulator](https://img.shields.io/badge/Environment-ShopSimulator%20v2.1-4C78A8)](https://arxiv.org/pdf/2601.18225)
 [![Benchmark](https://img.shields.io/badge/Benchmark-Final--200--Clean-F59E0B)](docs/evaluation-dataset.md)
 
@@ -108,9 +108,11 @@ GRPO 默认从完整导出的 Qwen3.5-9B SFT 模型开始。veRL 在 ShopSimulat
 四条轨迹，环境用确定性的 Reward v3 评估最终购买结果、约束满足程度和终止行为。
 训练不使用额外的 LLM-as-a-Judge Reward Model。
 
-本仓库没有复制 veRL 源码。GRPO 入口复用当前服务器 Python 环境中的 veRL 0.8
-接口，保留项目自己的 AgentLoop、工具适配层、运行时兼容代码和带 SHA-256 校验的
-动态采样补丁；不会自动重装服务器依赖。默认单机 8 张 NPU、FSDP Actor、Rollout TP=2，
+本仓库没有复制 veRL 源码。GRPO 入口选择当前服务器的 veRL `0.9.0.dev` 源码
+（接受等价的 `0.9.0.dev0` 及本地构建后缀），保留项目自己的 AgentLoop、工具适配层、
+运行时 hooks 和动态采样校验。不会安装其他 veRL 版本来替换服务器环境。
+旧动态采样补丁仍须与该服务器分支的源码核对及移植，接受版本号不代表接口适配已验证。
+默认单机 8 张 NPU、FSDP Actor、Rollout TP=2，
 GRPO 继续使用原有 LoRA 配方。详细配置见
 [GRPO 文档](docs/grpo.md)。
 
@@ -201,7 +203,9 @@ SFT 带来了主要能力提升，让模型学会合法工具调用、长程搜�
 | 单个 epoch（56 步） | ~62 分钟 | 89 GiB |
 | 完整 3 个 epoch | ~3 小时 | 89 GiB |
 
-### GRPO 训练（veRL 0.8，8 个环境 worker）
+### 既有 GRPO 耗时记录（veRL 0.8，8 个环境 worker）
+
+以下是原有环境记录，不是当前 veRL 0.9.0.dev/NPU 配置的实测结果。
 
 | 步数范围 | 单步耗时 | 累计耗时 |
 |---|---:|---:|

@@ -28,7 +28,8 @@ sft-accelerated = [
   "liger-kernel>=0.6,<1",
 ]
 grpo = [
-  "verl==0.8.0",
+  # veRL 0.9.0.dev is provided by the existing runtime or VERL_ROOT source.
+  # Do not replace the server's vendor build with a PyPI release.
   "vllm==0.25.1",
   "torch==2.11.0",
   "torchvision==0.26.0",

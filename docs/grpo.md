@@ -74,23 +74,42 @@ A missing dependency during `import verl` is reported with its original error;
 it is distinct from a missing source path. No reinstall of the working NPU
 stack is needed merely because `pip show verl` has no entry.
 
-Preflight requires Python 3.10 or newer, the veRL 0.8 APIs used by the adapter,
+The selected runtime must report **`0.9.0.dev`** or its equivalent spelling
+`0.9.0.dev0`; local build suffixes such as `+ascend` are accepted. Release 0.8,
+stable 0.9, other development revisions and 0.10 are not selected implicitly.
+This is a source-version requirement, not a request to install or replace the
+server's veRL. The `grpo` extra no longer installs veRL from PyPI; supply the
+prepared server checkout through its existing import path or `VERL_ROOT`.
+
+Preflight requires Python 3.10 or newer, the AgentLoop/Tool APIs used by the adapter,
 compatible installed dependencies and working NPU/HCCL support. It prints the
 selected versions and source paths instead of requiring the CUDA package pins
 or Python 3.12 from the clean-install recipe. A working unrelated veRL training
 job does not establish that this Shopping AgentLoop, Qwen3.5 FSDP training,
 LoRA weight synchronization and dynamic sampler are supported in a custom fork.
 Passing preflight is necessary but is not an end-to-end NPU training validation.
+If a 0.9 fork resolves `trainer.use_v1=true`, preflight stops: that entry point
+can bypass the `RayPPOTrainer` hooks used here. Its `trainer/main_ppo.py`,
+`main_ppo_v0.py` (if present) and `trainer/config/` must be checked before porting
+the integration or selecting another backend. See the
+[upstream 0.9 launcher](https://github.com/volcengine/verl/blob/v0.9.0/verl/trainer/main_ppo.py);
+the server's development fork may differ from that release.
 
-`scripts/setup.sh` without arguments is the pinned clean-install recipe; it is
-not needed for an already working training environment. If only the simulator
-is missing, use `bash scripts/setup.sh --shopsim-only`.
+`scripts/setup.sh` without arguments prepares the other pinned training dependencies
+and ShopSimulator. It does not install veRL or apply a trainer patch automatically,
+and does not certify that a GRPO environment is ready. It is not needed for an
+already working training environment. If only the simulator is missing, use
+`bash scripts/setup.sh --shopsim-only`.
 
 ### Dynamic-sampling patch
 
 This repository does not vendor veRL. Project-owned integration code lives in
-`src/shopping_grpo/training/grpo/`, and the bounded sampler requires the reviewed
-patch in `patches/verl-0.8.0-shopping-dynamic-sampling.patch`.
+`src/shopping_grpo/training/grpo/`. The bounded sampler requires a reviewed
+trainer integration. The existing file
+`patches/verl-0.8.0-shopping-dynamic-sampling.patch` retains its original name
+because it was produced from the 0.8 trainer source; it is **not a verified
+patch for an arbitrary 0.9.0.dev vendor fork**. The runtime version gate and
+trainer-source verification are separate checks.
 
 Use the same Python and source selection as training to check the patch:
 
@@ -99,19 +118,24 @@ PYTHONPATH="${VERL_ROOT:+${VERL_ROOT}:}${PYTHONPATH:-}" \
   "$PYTHON_BIN" scripts/apply_verl_dynamic_sampling_patch.py --check
 ```
 
-If the installed source matches the supported original veRL 0.8.0 revision,
-apply it once by omitting `--check`:
+Only if the selected 0.9.0.dev checkout's trainer source is byte-identical to
+the reviewed original SHA-256 may the existing patch be applied by omitting
+`--check`:
 
 ```bash
 PYTHONPATH="${VERL_ROOT:+${VERL_ROOT}:}${PYTHONPATH:-}" \
   "$PYTHON_BIN" scripts/apply_verl_dynamic_sampling_patch.py
 ```
 
-The script accepts an active environment or editable installation, but retains
-strict SHA-256 verification and a verified original backup. If a server fork's
-`ray_trainer.py` has a different hash, the patch must be ported and reviewed
-against that source. Do not force installation over the working environment,
-bypass the checksum, or disable dynamic sampling to hide the mismatch.
+The script accepts source-only and editable deployments, but retains strict
+SHA-256 verification and a verified original backup. Preflight also verifies
+the patched source hash, not just a marker comment. If a server fork's
+`ray_trainer.py` differs, it must be provided for comparison and a reviewed
+patch port before the default training recipe can run. A missing marker or
+unknown hash is reported with the exact source path. Do not force installation
+over the working environment, bypass the checksum, or disable dynamic sampling
+to hide the mismatch. Accepting the development version alone does not establish
+end-to-end compatibility or a successful NPU training run.
 
 ## Run
 

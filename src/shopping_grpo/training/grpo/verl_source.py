@@ -6,7 +6,22 @@ import sys
 from pathlib import Path
 
 
-def resolve_verl_source(expected_version="0.8.0"):
+REQUIRED_VERL_VERSION = "0.9.0.dev"
+
+
+def validate_verl_version(selected_version, expected_version=REQUIRED_VERL_VERSION):
+    """Accept the server dev version and its equivalent dev0/local-build spelling."""
+    def public_version(value):
+        public = str(value).strip().split("+", 1)[0]
+        return public + "0" if public.endswith(".dev") else public
+
+    if public_version(selected_version) != public_version(expected_version):
+        raise RuntimeError(
+            f"Shopping integration requires veRL {expected_version} source; found {selected_version!r}"
+        )
+
+
+def resolve_verl_source(expected_version=REQUIRED_VERL_VERSION):
     """Return (version, __init__.py) from the package this Python actually imports."""
     try:
         verl = importlib.import_module("verl")
@@ -38,9 +53,8 @@ def resolve_verl_source(expected_version="0.8.0"):
                 f"cannot determine veRL source version: no __version__ or readable {version_file}"
             ) from exc
     selected_version = selected_version.strip()
-    if selected_version.split("+", 1)[0] != expected_version:
-        raise RuntimeError(
-            f"Shopping integration requires veRL {expected_version} APIs; "
-            f"found {selected_version!r} from {source}"
-        )
+    try:
+        validate_verl_version(selected_version, expected_version)
+    except RuntimeError as exc:
+        raise RuntimeError(f"{exc} from {source}") from exc
     return selected_version, source

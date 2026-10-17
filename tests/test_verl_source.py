@@ -44,7 +44,7 @@ class VerLSourceTest(unittest.TestCase):
         self.work = self.root / "unrelated-working-directory"
         self.work.mkdir()
 
-    def package(self, source="__version__ = '0.8.0'\n", version_file=None):
+    def package(self, source="__version__ = '0.9.0.dev'\n", version_file=None):
         package = self.checkout / "verl"
         package.mkdir(exist_ok=True)
         (package / "__init__.py").write_text(source, encoding="utf-8")
@@ -87,24 +87,36 @@ class VerLSourceTest(unittest.TestCase):
         return json.loads(completed.stdout)
 
     def test_source_package_imports_without_distribution_metadata(self):
-        source = self.package("__version__ = '0.8.0+ascend.local'\n")
+        source = self.package("__version__ = '0.9.0.dev+ascend.local'\n")
         result = self.probe(verl_root=self.checkout)
-        self.assertEqual(result["version"], "0.8.0+ascend.local")
+        self.assertEqual(result["version"], "0.9.0.dev+ascend.local")
         self.assertEqual(Path(result["source"]), source)
         self.assertIsNone(result["metadata_version"])
 
     def test_source_version_file_fallback_without_distribution_metadata(self):
-        source = self.package("", version_file="  0.8.0+source\n")
+        source = self.package("", version_file="  0.9.0.dev+source\n")
         result = self.probe()
-        self.assertEqual(result["version"], "0.8.0+source")
+        self.assertEqual(result["version"], "0.9.0.dev+source")
         self.assertEqual(Path(result["source"]), source)
         self.assertIsNone(result["metadata_version"])
+
+    def test_dev_and_dev0_spellings_and_local_builds_are_equivalent(self):
+        for value in ("0.9.0.dev", "0.9.0.dev0", "0.9.0.dev+ascend", "0.9.0.dev0+ascend"):
+            with self.subTest(version=value):
+                self.package(f"__version__ = {value!r}\n")
+                self.assertEqual(self.probe()["version"], value)
+
+    def test_stable_future_and_other_dev_revisions_are_not_silently_accepted(self):
+        for value in ("0.8.0", "0.9.0", "0.9.0rc1", "0.9.0.dev1", "0.10.0.dev"):
+            with self.subTest(version=value):
+                self.package(f"__version__ = {value!r}\n")
+                self.assertIn("requires veRL 0.9.0.dev source", self.probe(succeeds=False)["error"])
 
     def test_blank_or_non_string_attribute_falls_back_to_source_file(self):
         for value in ("'  '", "None", "8"):
             with self.subTest(value=value):
-                self.package(f"__version__ = {value}\n", version_file="0.8.0\n")
-                self.assertEqual(self.probe()["version"], "0.8.0")
+                self.package(f"__version__ = {value}\n", version_file="0.9.0.dev\n")
+                self.assertEqual(self.probe()["version"], "0.9.0.dev")
 
     def test_missing_package_explains_source_path_selection(self):
         error = self.probe(succeeds=False)["error"]
@@ -134,10 +146,10 @@ class VerLSourceTest(unittest.TestCase):
         self.assertIn(str(source), error)
         self.assertIn(str(requested / "verl/__init__.py"), error)
 
-    def test_non_08_source_is_rejected(self):
+    def test_other_source_version_is_rejected(self):
         self.package("__version__ = '0.7.0+ascend'\n")
         error = self.probe(succeeds=False)["error"]
-        self.assertIn("requires veRL 0.8.0 APIs", error)
+        self.assertIn("requires veRL 0.9.0.dev source", error)
         self.assertIn("0.7.0+ascend", error)
 
     def test_old_distribution_metadata_does_not_override_selected_source(self):
@@ -145,21 +157,21 @@ class VerLSourceTest(unittest.TestCase):
         self.metadata("0.7.0")
         result = self.probe()
         self.assertEqual(result["metadata_version"], "0.7.0")
-        self.assertEqual(result["version"], "0.8.0")
+        self.assertEqual(result["version"], "0.9.0.dev")
         self.assertEqual(Path(result["source"]), source)
 
     def test_matching_distribution_metadata_cannot_mask_wrong_source_version(self):
         self.package("__version__ = '0.7.0'\n")
-        self.metadata("0.8.0")
+        self.metadata("0.9.0.dev")
         result = self.probe(succeeds=False)
-        self.assertEqual(result["metadata_version"], "0.8.0")
+        self.assertEqual(result["metadata_version"], "0.9.0.dev")
         self.assertIn("found '0.7.0'", result["error"])
 
     def test_distribution_metadata_cannot_replace_missing_source_version(self):
         self.package("")
-        self.metadata("0.8.0")
+        self.metadata("0.9.0.dev")
         result = self.probe(succeeds=False)
-        self.assertEqual(result["metadata_version"], "0.8.0")
+        self.assertEqual(result["metadata_version"], "0.9.0.dev")
         self.assertIn("cannot determine veRL source version", result["error"])
 
     def test_namespace_package_is_not_a_complete_verl_checkout(self):

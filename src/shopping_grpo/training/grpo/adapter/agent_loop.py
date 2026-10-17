@@ -1,4 +1,4 @@
-"""veRL 0.8 ToolAgentLoop 的 ShopSimulator 轨迹生命周期适配。
+"""veRL ToolAgentLoop 的 ShopSimulator 轨迹生命周期适配。
 
 这个类不重新实现模型生成，而是在三个边界插入项目约束：上下文超长时压缩、工具
 返回后投影 observation、trajectory 结束时计算奖励并释放环境。

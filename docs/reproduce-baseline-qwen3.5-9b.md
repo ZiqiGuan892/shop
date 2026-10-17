@@ -93,7 +93,7 @@ vLLM Ascend 官方 `v0.23.0.post1` 的配套版本如下；需要整组匹配，
 
 驱动和固件须满足该 CANN 版本的厂商要求。已有可用 NPU 模型服务时，可以跳过容器创建，直接对照第 7 节检查接口与推理配置。
 
-不带参数的 `scripts/setup.sh` 会安装 `sft` 和 `grpo` extras，其中包含 `torch==2.11.0`、`vllm==0.25.1`、`verl==0.8.0` 等训练依赖。已有 NPU 训练环境时，使用 `bash scripts/setup.sh --shopsim-only` 仅准备 ShopSimulator，或采用下文的分组件安装命令；不要执行无参数的全量安装。
+不带参数的 `scripts/setup.sh` 会安装 `sft` 和 `grpo` extras，其中仍包含 `torch==2.11.0`、`vllm==0.25.1` 等新环境训练依赖；veRL 改为由已有服务器提供 `0.9.0.dev` 源码，不自动安装或打补丁。已有 NPU 训练环境时，使用 `bash scripts/setup.sh --shopsim-only` 仅准备 ShopSimulator，或采用下文的分组件安装命令；不要执行无参数的全量安装。
 
 ## 3 获取仓库并固定评测文件
 

@@ -170,7 +170,7 @@ class ShopSimulatorTool(BaseTool):
         return ToolResponse(text=observation), 0.0, step
 
     async def release(self, instance_id, **kwargs):
-        # veRL 0.8 会在每次 tool call 后执行 release；真正的环境租约由 AgentLoop 释放。
+        # ToolAgentLoop 在每次 tool call 后执行 release；真正的环境租约由 AgentLoop 释放。
         del instance_id, kwargs
 
 

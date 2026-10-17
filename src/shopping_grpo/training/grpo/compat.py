@@ -1,4 +1,4 @@
-"""veRL 0.8 的窄范围运行时兼容。"""
+"""服务器 veRL 0.9.0.dev 的项目 runtime hooks；入口仍须检查实际接口。"""
 
 
 def _install_trace_actor_update():
@@ -66,6 +66,6 @@ def install_torch_padding_fallback():
         fallback.rearrange,
         fallback.unpad_input,
     )
-    # ponytail: veRL 0.8 在 CUDA 上硬导入 FA2；上游提供 torch fallback 后删除此 hook。
+    # 保留服务器分支需要的 torch padding hook；由预检查验证这些接口存在。
     attention_utils._get_attention_functions = lambda: functions
     _install_trace_actor_update()

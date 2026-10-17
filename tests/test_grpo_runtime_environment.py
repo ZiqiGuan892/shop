@@ -48,7 +48,7 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         self.output.__enter__()
         self.addCleanup(self.output.__exit__, None, None, None)
         self.versions = {
-            "verl": "0.8.0+ascend.local",
+            "verl": "0.9.0.dev+ascend.local",
             "vllm": "0.18.0+empty",
             "torch": "2.9.0",
             "transformers": "5.0.0.dev0",
@@ -62,7 +62,7 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         }
         self.verl = types.SimpleNamespace(
             __file__=str(ROOT / "fake-vendor/verl/__init__.py"),
-            __version__="0.8.0+ascend.local",
+            __version__="0.9.0.dev+ascend.local",
         )
 
     def installed_version(self, package):
@@ -89,7 +89,7 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         installed = self.dependencies()
         self.assertEqual(installed["torch"], "2.9.0")
         self.assertEqual(installed["vllm"], "0.18.0+empty")
-        self.assertEqual(installed["verl"], "0.8.0+ascend.local")
+        self.assertEqual(installed["verl"], "0.9.0.dev+ascend.local")
         self.assertNotIn("swanlab", installed)
         self.assertIn("torch-npu", installed)
         self.assertIn("vllm-ascend", installed)
@@ -110,7 +110,7 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
 
     def test_wrong_verl_public_version_is_rejected(self):
         self.verl.__version__ = "0.7.0+ascend"
-        with self.assertRaisesRegex(SystemExit, "requires veRL 0.8.0 APIs"):
+        with self.assertRaisesRegex(SystemExit, "requires veRL 0.9.0.dev source"):
             self.dependencies()
 
     def test_verl_source_without_pip_metadata_is_accepted(self):
@@ -120,7 +120,7 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
 
     def test_verl_source_version_takes_precedence_over_unrelated_metadata(self):
         self.versions["verl"] = "0.7.0"
-        self.assertEqual(self.dependencies()["verl"], "0.8.0+ascend.local")
+        self.assertEqual(self.dependencies()["verl"], "0.9.0.dev+ascend.local")
 
     def test_npu_launch_uses_hccl_without_requiring_cuda(self):
         torch = self.mock_npu_torch()
@@ -129,6 +129,14 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         torch.npu.device_count.assert_called_once_with()
         torch.distributed.is_backend_available.assert_called_once_with("hccl")
         torch.cuda.is_available.assert_not_called()
+
+    def test_v1_trainer_cannot_bypass_reviewed_shopping_hooks(self):
+        runtime.validate_trainer_backend(self.config)
+        self.config.trainer.use_v1 = False
+        runtime.validate_trainer_backend(self.config)
+        self.config.trainer.use_v1 = True
+        with self.assertRaisesRegex(SystemExit, "trainer.use_v1=true"):
+            runtime.validate_trainer_backend(self.config)
 
     def test_too_few_visible_npus_fail_preflight(self):
         with self.assertRaisesRegex(SystemExit, "requested 8 npu devices, but only 4 are visible"):

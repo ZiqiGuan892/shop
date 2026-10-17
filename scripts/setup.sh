@@ -9,8 +9,11 @@ Usage: bash scripts/setup.sh [--shopsim-only]
                   and search index. Keep the existing training environment.
   --help          Show this help without installing anything.
 
-Without arguments, install the full SFT/GRPO stack and ShopSimulator, then apply
-the repository's veRL patch. Use --shopsim-only when veRL is already installed.
+Without arguments, install the SFT/GRPO dependencies and ShopSimulator. veRL
+0.9.0.dev must be provided separately by the existing Python environment or
+VERL_ROOT; setup does not install or patch veRL. Use --shopsim-only on servers
+with an existing training environment, then run scripts/grpo.sh --check-only
+in that environment before training.
 If uv is missing, install it with curl or wget into UV_INSTALL_DIR (default:
 $HOME/.local/bin). Existing uv installations are reused; shell profiles are not
 modified. SHOPSIM_PYTHON defaults to 3.10 (a Python executable path also works).
@@ -126,8 +129,9 @@ PYTHONPATH=. "${ENV_DIR}/bin/python" scripts/build_index.py
 
 cd "${ROOT}"
 if [[ "${SHOPSIM_ONLY}" == false ]]; then
-  "${ROOT}/.venv/bin/python" scripts/apply_verl_dynamic_sampling_patch.py
-  echo "Shopping Agent training environment is ready."
+  echo "Shopping Agent dependencies and ShopSimulator are ready."
+  echo "GRPO requires the existing veRL 0.9.0.dev runtime or VERL_ROOT source; setup has not installed or patched veRL."
+  echo "Validate the selected training environment: bash scripts/grpo.sh --check-only"
 else
   echo "Standalone ShopSimulator environment is ready."
 fi

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Check, apply or restore the patch in the invoking Python's veRL installation.
 
-Source checkouts, editable installations and local-version builds are supported; the source
-checksums still restrict writes to the reviewed veRL 0.8 trainer revision.
+The selected runtime is veRL 0.9.0.dev. The bundled patch was reviewed against
+the earlier 0.8 trainer source; only byte-identical source hashes can use it.
+Other vendor trainer revisions require a reviewed port, not a forced patch.
 """
 
 from __future__ import annotations
@@ -16,17 +17,18 @@ import sys
 from pathlib import Path
 
 
-EXPECTED_VERL_VERSION = "0.8.0"
-EXPECTED_ORIGINAL_SHA256 = "de58d295cf86656a28196b0718168d4a11666f3e30957b7e166914496c2a6d66"
-EXPECTED_PATCHED_SHA256 = "684b491e20ba9d41e91d5010186d4d08b01a01fc67f8a77d17c086b0381e00a3"
-SUPERSEDED_PATCHED_SHA256 = "fc3564cc5680a9fa92ca7b0a9bc3ae87ccdc90c498ab1bfe34c6796d6c54fb5a"
-PATCH_MARKER = "SHOPPING_GRPO_DYNAMIC_SAMPLING_PATCH_V3"
 BACKUP_SUFFIX = ".shopping-grpo-dynamic-sampling.orig"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PATCH_FILE = PROJECT_ROOT / "patches/verl-0.8.0-shopping-dynamic-sampling.patch"
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from shopping_grpo.training.grpo.verl_source import resolve_verl_source
+from shopping_grpo.training.grpo.verl_source import REQUIRED_VERL_VERSION, resolve_verl_source
+from shopping_grpo.training.grpo.patch_contract import (
+    EXPECTED_ORIGINAL_SHA256, EXPECTED_PATCHED_SHA256, PATCH_MARKER,
+    SUPERSEDED_PATCHED_SHA256,
+)
+
+EXPECTED_VERL_VERSION = REQUIRED_VERL_VERSION
 
 
 def sha256(path: Path) -> str:
@@ -87,6 +89,7 @@ def apply_patch(target: Path) -> None:
             "refusing to patch unknown ray_trainer.py: "
             f"expected original SHA256 {EXPECTED_ORIGINAL_SHA256}, got {target_hash}. "
             "This veRL fork needs a reviewed port of the dynamic-sampling patch; "
+            f"provide {target} to adapt the patch to the server's 0.9.0.dev source. "
             "do not reinstall the working server environment or bypass the checksum check."
         )
     if not PATCH_FILE.is_file():
@@ -148,7 +151,7 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Use the veRL installation imported by this Python interpreter, including "
             "an external editable checkout. Source SHA256 checks remain mandatory; "
-            "customized forks require a reviewed patch port."
+            "0.9.0.dev vendor forks require a reviewed patch port unless source hashes match."
         )
     )
     parser.add_argument(
