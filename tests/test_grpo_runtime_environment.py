@@ -156,6 +156,91 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         self.config.ray_kwargs.ray_init.resources.NPU = 4
         with self.assertRaisesRegex(SystemExit, "Ray NPU resources must equal"):
             runtime.validate_device(self.config, self.mock_npu_torch())
+        self.config.ray_kwargs.ray_init.resources.NPU = 8.5
+        with self.assertRaisesRegex(SystemExit, "Ray NPU resources must equal"):
+            runtime.validate_device(self.config, self.mock_npu_torch())
+
+    def ray_config(self):
+        config = OmegaConf.create(OmegaConf.to_container(self.config, resolve=False))
+        config.ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH = os.environ["PYTHONPATH"]
+        return config
+
+    def test_literal_ray_init_is_valid_without_loading_ray_or_models(self):
+        config = self.ray_config()
+        runtime.validate_ray_init(config)
+        raw = OmegaConf.to_container(config.ray_kwargs.ray_init, resolve=False)
+        self.assertEqual(raw["resources"]["NPU"], 8)
+        self.assertIs(type(raw["resources"]["NPU"]), int)
+        self.assertIn("GRPO Ray init preflight passed", self.stdout.getvalue())
+
+    def test_resource_interpolation_is_rejected_even_when_attribute_access_resolves_it(self):
+        config = self.ray_config()
+        config.ray_kwargs.ray_init.resources.NPU = "${trainer.n_gpus_per_node}"
+        self.assertEqual(config.ray_kwargs.ray_init.resources.NPU, 8)
+        self.assertEqual(
+            OmegaConf.to_container(config.ray_kwargs.ray_init, resolve=False)["resources"]["NPU"],
+            "${trainer.n_gpus_per_node}",
+        )
+        with self.assertRaisesRegex(SystemExit, "unresolved Ray interpolation.*resources.NPU"):
+            runtime.validate_ray_init(config)
+
+    def test_worker_path_interpolation_is_rejected_even_when_environment_resolves_it(self):
+        config = self.ray_config()
+        config.ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH = "${oc.env:PYTHONPATH}"
+        self.assertEqual(config.ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH, os.environ["PYTHONPATH"])
+        with self.assertRaisesRegex(SystemExit, "unresolved Ray interpolation.*PYTHONPATH"):
+            runtime.validate_ray_init(config)
+
+    def test_nested_ray_interpolations_are_rejected_before_runtime_initialization(self):
+        config = self.ray_config()
+        config.ray_kwargs.ray_init.runtime_env.py_modules = ["${oc.env:PYTHONPATH}"]
+        with self.assertRaisesRegex(SystemExit, "unresolved Ray interpolation.*py_modules"):
+            runtime.validate_ray_init(config)
+
+    def test_ray_resources_require_finite_nonnegative_numbers(self):
+        for value in ("8", True, False, -1, float("inf"), float("-inf"), float("nan"), None):
+            with self.subTest(value=value):
+                config = self.ray_config()
+                config.ray_kwargs.ray_init.resources.NPU = value
+                with self.assertRaisesRegex(SystemExit, "Ray resource NPU must be a finite non-negative number"):
+                    runtime.validate_ray_init(config)
+        config = self.ray_config()
+        config.ray_kwargs.ray_init.resources.extra_capacity = 0.5
+        config.ray_kwargs.ray_init.resources.unused_capacity = 0
+        runtime.validate_ray_init(config)
+
+    def test_worker_environment_requires_strings_and_matching_concrete_import_path(self):
+        for value in (1, True, None):
+            with self.subTest(value=value):
+                config = self.ray_config()
+                config.ray_kwargs.ray_init.runtime_env.env_vars.EXTRA = value
+                with self.assertRaisesRegex(SystemExit, "env_vars must contain string values"):
+                    runtime.validate_ray_init(config)
+        for value in ("", "/another/import/path"):
+            with self.subTest(pythonpath=value):
+                config = self.ray_config()
+                config.ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH = value
+                with self.assertRaisesRegex(SystemExit, "Ray worker PYTHONPATH must equal"):
+                    runtime.validate_ray_init(config)
+        config = self.ray_config()
+        with mock.patch.dict(os.environ, {"PYTHONPATH": ""}):
+            with self.assertRaisesRegex(SystemExit, "Ray worker PYTHONPATH must equal"):
+                runtime.validate_ray_init(config)
+
+    def test_invalid_ray_init_fails_before_dependency_and_device_checks(self):
+        config = self.ray_config()
+        config.ray_kwargs.ray_init.resources.NPU = "${trainer.n_gpus_per_node}"
+        fake_torch = self.mock_npu_torch()
+        with mock.patch.dict(sys.modules, {"torch": fake_torch}), \
+                mock.patch.object(runtime.importlib.util, "find_spec", return_value=None), \
+                mock.patch.object(runtime, "compose_runtime_config", return_value=config), \
+                mock.patch.object(runtime, "validate_installed_dependencies") as dependencies, \
+                mock.patch.object(runtime, "validate_device") as device:
+            with self.assertRaisesRegex(SystemExit, "unresolved Ray interpolation"):
+                runtime.main()
+        dependencies.assert_not_called()
+        device.assert_not_called()
+        fake_torch.npu.is_available.assert_not_called()
 
     def test_eight_trajectories_produce_one_local_accumulation_step_on_eight_cards(self):
         self.assertEqual(runtime.validate_parallel_batches(self.config), 1)

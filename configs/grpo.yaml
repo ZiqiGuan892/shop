@@ -138,10 +138,12 @@ ray_kwargs:
     # A local Ray runtime is still required by veRL on one machine.
     address: local
     resources:
-      NPU: ${trainer.n_gpus_per_node}
+      # The server passes ray_init to Ray with OmegaConf resolve=False.
+      NPU: 8
     runtime_env:
       env_vars:
-        PYTHONPATH: ${oc.env:PYTHONPATH}
+        # scripts/train_grpo.py supplies the concrete worker import path.
+        PYTHONPATH: ""
         PYTHONUNBUFFERED: "1"
       worker_process_setup_hook: shopping_grpo.training.grpo.compat.install_torch_padding_fallback
 

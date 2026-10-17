@@ -173,6 +173,58 @@ def validate_trainer_backend(config):
     print("GRPO trainer selection: trainer.use_v1=false; Shopping requires RayPPOTrainer")
 
 
+def validate_ray_init(config):
+    """Check what the server actually forwards to Ray, without interpolation."""
+    from omegaconf import OmegaConf
+
+    if not OmegaConf.is_dict(config.ray_kwargs.ray_init):
+        raise SystemExit("ray_kwargs.ray_init must be a mapping of Ray initialization arguments")
+    ray_init = OmegaConf.to_container(config.ray_kwargs.ray_init, resolve=False)
+
+    def check_literals(value, path):
+        if isinstance(value, dict):
+            for name, item in value.items():
+                check_literals(item, f"{path}.{name}")
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                check_literals(item, f"{path}[{index}]")
+        elif isinstance(value, str) and "${" in value:
+            raise SystemExit(
+                f"unresolved Ray interpolation at {path}: {value!r}; "
+                "the server forwards ray_init without resolving OmegaConf. "
+                "Use literal Ray values and launch with scripts/grpo.sh for the worker PYTHONPATH."
+            )
+
+    check_literals(ray_init, "ray_kwargs.ray_init")
+    resources = ray_init.get("resources")
+    if resources is None:
+        resources = {}
+    if not isinstance(resources, dict):
+        raise SystemExit("Ray resources must be a mapping of names to numeric quantities")
+    for name, value in resources.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise SystemExit(f"Ray resource {name} must be a finite non-negative number, got {value!r}")
+    runtime_env = ray_init.get("runtime_env")
+    if runtime_env is None:
+        runtime_env = {}
+    if not isinstance(runtime_env, dict):
+        raise SystemExit("Ray runtime_env must be a mapping")
+    env_vars = runtime_env.get("env_vars")
+    if env_vars is None:
+        env_vars = {}
+    if not isinstance(env_vars, dict) or any(not isinstance(value, str) for value in env_vars.values()):
+        raise SystemExit("Ray runtime_env.env_vars must contain string values")
+    expected_pythonpath = os.environ.get("PYTHONPATH")
+    if not expected_pythonpath or env_vars.get("PYTHONPATH") != expected_pythonpath:
+        raise SystemExit(
+            "Ray worker PYTHONPATH must equal the launcher's concrete PYTHONPATH; "
+            "launch with scripts/grpo.sh and use shell PYTHONPATH or VERL_ROOT for additional imports"
+        )
+    print("GRPO Ray init preflight passed: " + json.dumps({
+        "resources": resources, "worker_pythonpath_verified": True,
+    }, sort_keys=True))
+
+
 def validate_device(config, torch):
     device = str(config.trainer.device)
     if device not in ("npu", "cuda"):
@@ -190,7 +242,7 @@ def validate_device(config, torch):
         raise SystemExit("single-node GRPO requires ray_kwargs.ray_init.address=local")
     if device == "npu":
         resources = config.ray_kwargs.ray_init.get("resources", {})
-        if int(resources.get("NPU", 0)) != requested:
+        if resources.get("NPU", 0) != requested:
             raise SystemExit("Ray NPU resources must equal trainer.n_gpus_per_node")
         if not torch.distributed.is_backend_available("hccl"):
             raise SystemExit("HCCL is unavailable; activate the working torch_npu environment")
@@ -546,6 +598,7 @@ def main():
         importlib.import_module("torch_npu")
     config = compose_runtime_config(sys.argv[1:])
     validate_launch_paths(config)
+    validate_ray_init(config)
     installed = validate_installed_dependencies(config)
     validate_trainer_backend(config)
     validate_device(config, torch)

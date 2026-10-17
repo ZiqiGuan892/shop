@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,17 @@ DEFAULT_MANIFEST = ROOT / "data/environment.json"
 DEFAULT_MODEL = ROOT / "outputs/models/sft-full"
 DEFAULT_TRAIN_DATA = ROOT / "data/grpo/train.parquet"
 DEFAULT_VAL_DATA = ROOT / "data/grpo/validation.parquet"
+
+
+def _quote_hydra_string(value: str) -> str:
+    """Escape quotes and adjacent backslashes without changing ordinary paths."""
+    # Hydra quoted strings do not use JSON's general backslash escaping.
+    escaped = re.sub(
+        r'(\\*)("|$)',
+        lambda match: match[1] * 2 + ('\\"' if match[2] == '"' else ""),
+        value,
+    )
+    return f'"{escaped}"'
 
 
 def _model_has_weights(path: Path) -> bool:
@@ -59,7 +71,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def hydra_overrides(args: argparse.Namespace) -> list[str]:
+def hydra_overrides(args: argparse.Namespace, environment=None) -> list[str]:
     logger = "[console,swanlab]" if args.logger == "swanlab" else "[console]"
     extra = list(args.hydra_overrides)
     if extra[:1] == ["--"]:
@@ -70,14 +82,26 @@ def hydra_overrides(args: argparse.Namespace) -> list[str]:
         "data.val_files": "--val-data",
         "trainer.default_local_dir": "--output",
     }
+    worker_pythonpath = "ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH"
     for item in extra:
         if item.startswith("--"):
             raise SystemExit("only Hydra key=value overrides are accepted after --")
         key = item.split("=", 1)[0].lstrip("+~")
+        if key == worker_pythonpath or worker_pythonpath.startswith(key + "."):
+            raise SystemExit(
+                "set worker PYTHONPATH using shell PYTHONPATH or VERL_ROOT; "
+                "the launcher forwards the same concrete import path to preflight and Ray workers"
+            )
         for field, option in paths.items():
             if key == field or field.startswith(key + "."):
                 raise SystemExit(f"set {field} using {option}, so preflight and training use the same path")
-    return [f"trainer.logger={logger}", f"trainer.experiment_name={args.experiment_name}", *extra]
+    overrides = [f"trainer.logger={logger}", f"trainer.experiment_name={args.experiment_name}"]
+    if environment is not None:
+        # The server's main_ppo converts ray_init without resolving interpolation.
+        # Quote the actual path as one Hydra string, passed via argv (not a shell).
+        value = _quote_hydra_string(environment["PYTHONPATH"])
+        overrides.append(f"++{worker_pythonpath}={value}")
+    return [*overrides, *extra]
 
 
 def _validated_path(path: Path, description: str) -> Path:
@@ -153,7 +177,7 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
         "verl.trainer.main_ppo",
         f"--config-path={config.parent}",
         f"--config-name={config.stem}",
-        *hydra_overrides(args),
+        *hydra_overrides(args, environment),
     ]
     return command, environment
 
@@ -202,7 +226,7 @@ def main() -> None:
     preflight = [
         sys.executable,
         str(ROOT / "scripts/check_grpo_runtime.py"),
-        *hydra_overrides(args),
+        *hydra_overrides(args, environment),
     ]
     preflight_status = subprocess.call(preflight, cwd=ROOT, env=environment)
     if preflight_status or args.check_only:

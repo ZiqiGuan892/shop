@@ -13,6 +13,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from omegaconf import OmegaConf
+
 from scripts import train_grpo
 
 
@@ -46,6 +48,22 @@ class GRPOLauncherTest(unittest.TestCase):
         with patch.object(train_grpo, "parse_args", return_value=args), patch("builtins.print"):
             train_grpo.main()
 
+    def compose_project_overrides(self, overrides, environment):
+        """Exercise Hydra parsing without importing the vendor veRL package."""
+        from scripts.check_grpo_runtime import compose_runtime_config
+
+        config = OmegaConf.load(ROOT / "configs/grpo.yaml")
+        del config["defaults"]
+        del config["hydra"]
+        config_path = self.root / "literal-ray.yaml"
+        OmegaConf.save(config, config_path)
+        with patch.dict(os.environ, {
+            **environment,
+            "GRPO_CONFIG_DIR": str(self.root),
+            "GRPO_CONFIG_NAME": config_path.stem,
+        }):
+            return compose_runtime_config(overrides)
+
     def test_current_python_paths_and_local_ray_are_preserved(self):
         command, env = train_grpo.build_command(self.args())
         self.assertEqual(command[:3], [sys.executable, "-m", "verl.trainer.main_ppo"])
@@ -66,6 +84,58 @@ class GRPOLauncherTest(unittest.TestCase):
         with patch.dict(os.environ, {"VERL_ROOT": str(checkout / "verl")}):
             with self.assertRaisesRegex(SystemExit, "checkout containing"):
                 train_grpo.build_command(self.args())
+
+    def test_ray_receives_literal_resources_and_exact_worker_import_path(self):
+        from scripts.check_grpo_runtime import validate_ray_init
+
+        checkout = self.root / "vendor verl,local"
+        (checkout / "verl").mkdir(parents=True)
+        (checkout / "verl/__init__.py").write_text("", encoding="utf-8")
+        paths = (
+            "/existing vendor/imports,/other/path",
+            r"C:\vendor imports\src;D:\modules,extra\src",
+            '/vendor code/has "quotes", spaces=/src',
+            r'C:\vendor\"quoted"\src',
+            r"C:\vendor\src" + "\\",
+            r"C:\vendor\src" + "\\\\",
+        )
+        for original_path in paths:
+            with self.subTest(pythonpath=original_path), patch.dict(os.environ, {
+                "VERL_ROOT": str(checkout), "PYTHONPATH": original_path,
+            }):
+                command, environment = train_grpo.build_command(self.args())
+                config = self.compose_project_overrides(command[5:], environment)
+                raw = OmegaConf.to_container(config.ray_kwargs.ray_init, resolve=False)
+                expected = os.pathsep.join((str(ROOT / "src"), str(checkout.resolve()), original_path))
+                self.assertEqual(environment["PYTHONPATH"], expected)
+                self.assertEqual(raw["runtime_env"]["env_vars"]["PYTHONPATH"], expected)
+                self.assertEqual(raw["resources"]["NPU"], 8)
+                self.assertIs(type(raw["resources"]["NPU"]), int)
+                self.assertEqual(raw["runtime_env"]["env_vars"]["PYTHONUNBUFFERED"], "1")
+                self.assertEqual(
+                    raw["runtime_env"]["worker_process_setup_hook"],
+                    "shopping_grpo.training.grpo.compat.install_torch_padding_fallback",
+                )
+                with patch.dict(os.environ, environment), patch("builtins.print"):
+                    validate_ray_init(config)
+
+    def test_worker_pythonpath_and_parent_overrides_cannot_bypass_launcher(self):
+        field = "ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH"
+        for key in (field, "ray_kwargs.ray_init.runtime_env.env_vars",
+                    "ray_kwargs.ray_init.runtime_env", "ray_kwargs.ray_init", "ray_kwargs"):
+            for prefix in ("", "+", "++", "~"):
+                override = prefix + key + "={}"
+                with self.subTest(override=override), self.assertRaisesRegex(SystemExit, "shell PYTHONPATH or VERL_ROOT"):
+                    train_grpo.build_command(self.args("--", override))
+
+    def test_other_worker_environment_overrides_still_compose(self):
+        command, environment = train_grpo.build_command(self.args(
+            "--", '++ray_kwargs.ray_init.runtime_env.env_vars.EXTRA_IMPORT_FLAG="enabled"',
+        ))
+        config = self.compose_project_overrides(command[5:], environment)
+        env_vars = OmegaConf.to_container(config.ray_kwargs.ray_init.runtime_env.env_vars, resolve=False)
+        self.assertEqual(env_vars["EXTRA_IMPORT_FLAG"], "enabled")
+        self.assertEqual(env_vars["PYTHONPATH"], environment["PYTHONPATH"])
 
     def test_default_model_is_sft_result_and_explicit_override_wins(self):
         self.assertEqual(train_grpo.parse_args([]).model, ROOT / "outputs/models/sft-full")
@@ -132,6 +202,17 @@ class GRPOLauncherTest(unittest.TestCase):
                 self.main(args)
         self.assertEqual(exc.exception.code, 7)
         self.assertEqual(check.call_args.args[0][2:], train.call_args.args[0][5:])
+        check_environment = check.call_args.kwargs["env"]
+        train_environment = train.call_args.args[1]
+        self.assertEqual(check_environment, train_environment)
+        overrides = check.call_args.args[0][2:]
+        worker_overrides = [item for item in overrides if "env_vars.PYTHONPATH=" in item]
+        self.assertEqual(len(worker_overrides), 1)
+        raw = OmegaConf.to_container(
+            self.compose_project_overrides(overrides, check_environment).ray_kwargs.ray_init,
+            resolve=False,
+        )
+        self.assertEqual(raw["runtime_env"]["env_vars"]["PYTHONPATH"], train_environment["PYTHONPATH"])
         audit = json.loads((self.output / "launch.json").read_text(encoding="utf-8"))
         self.assertEqual(audit["python"], sys.executable)
         self.assertEqual(audit["model"], str(self.model.resolve()))

@@ -206,6 +206,16 @@ Ray remains required by veRL even on one machine. The launcher selects a local
 Ray runtime with `nnodes=1`; it does not wait for a second node and does not run
 `ray start` or `ray stop` against other jobs.
 
+The server's `main_ppo.py` converts the Ray initialization configuration with
+`OmegaConf.to_container` without resolving interpolation. The eight-NPU recipe
+therefore sets `ray_kwargs.ray_init.resources.NPU` to the number `8`, and the
+launcher passes the actual `PYTHONPATH` as a quoted Hydra argument to both
+preflight and training. Set additional import directories with shell
+`PYTHONPATH` or `VERL_ROOT`; do not override the worker path separately.
+Preflight checks the unresolved container that Ray will receive, rejecting
+`${...}` placeholders, string resource quantities and a different worker path.
+This does not change sampling budgets or model training parameters.
+
 The output directory must be new or empty. To retain an earlier run or a failed
 launch's log, select a new directory using `--output`, for example:
 
