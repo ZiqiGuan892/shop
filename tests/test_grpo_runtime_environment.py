@@ -227,6 +227,25 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "requires veRL 0.9.0.dev source"):
             self.dependencies()
 
+    def test_static_plot_preflight_checks_only_when_enabled(self):
+        target = "shopping_grpo.training.grpo.plots.check_plot_dependencies"
+        with mock.patch.dict(os.environ, {"SHOPPING_GRPO_PLOT_INTERVAL": "0"}), \
+                mock.patch(target) as check:
+            runtime.validate_static_plots()
+            check.assert_not_called()
+        with mock.patch.dict(os.environ, {"SHOPPING_GRPO_PLOT_INTERVAL": "600"}), \
+                mock.patch(target) as check:
+            runtime.validate_static_plots()
+            check.assert_called_once_with()
+        self.assertIn("600 seconds; no web server", self.stdout.getvalue())
+
+    def test_missing_plot_dependency_fails_before_training(self):
+        with mock.patch.dict(os.environ, {"SHOPPING_GRPO_PLOT_INTERVAL": "600"}), \
+                mock.patch("shopping_grpo.training.grpo.plots.check_plot_dependencies",
+                           side_effect=RuntimeError("install matplotlib")):
+            with self.assertRaisesRegex(SystemExit, "install matplotlib"):
+                runtime.validate_static_plots()
+
     def test_verl_source_without_pip_metadata_is_accepted(self):
         del self.versions["verl"]
         self.assertEqual(self.dependencies()["verl"], self.verl.__version__)

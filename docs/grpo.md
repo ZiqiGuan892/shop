@@ -61,11 +61,13 @@ still enforce the supported version and APIs. They do not require veRL pip
 metadata, and do not borrow version metadata from another installed checkout.
 Other required dependencies are still checked in the selected environment.
 
-TensorBoard is the default metrics backend alongside the console. If it is
-missing, install only the logging dependency in the active training environment:
+TensorBoard is the default metrics backend alongside the console. Static PNG
+plots are exported automatically every **600 seconds (10 minutes)**, without
+starting a web server. Install only the logging/plotting dependencies in the
+active training environment if they are missing:
 
 ```bash
-"$PYTHON_BIN" -m pip install 'tensorboard>=2.18,<3'
+"$PYTHON_BIN" -m pip install 'tensorboard>=2.18,<3' 'matplotlib>=3.8,<4'
 ```
 
 Do not reinstall the full `grpo` extra over an already working vendor NPU stack
@@ -384,6 +386,13 @@ For the default `--output outputs/models/grpo`, the launcher writes:
 - `training_diagnostics.jsonl`: generated trajectories and optimizer metrics.
 - `tensorboard/events.out.tfevents.*`: scalar event files when using the
   default `--logger tensorboard` (console output remains enabled).
+- `plots/summary.png`: overview of reward, strict reward, purchase success,
+  policy loss, gradient norm and skipped-update count.
+- `plots/*.png`: individual curves for all recorded scalar metrics, including
+  validation metrics when present. `plots/index.json` maps exact tags to files
+  and records the source, latest step and nonfinite-value counts.
+- `plots/metrics.csv`: raw scalar values, including repeated steps and NaN/Inf.
+- `plots.log`: static export progress and errors.
 - veRL checkpoints and Hydra artifacts beneath the same run directory.
 - Each `global_step_N/` checkpoint also contains `data.pt` and
   `shopping_sampler_state.json` for dynamic-sampling resume, alongside the
@@ -425,26 +434,62 @@ directory and forwards the same literal path to Ray. It overrides a stale
 shell `TENSORBOARD_DIR` to keep runs separate. Preflight checks the selected
 veRL backend, PyTorch SummaryWriter import and driver/Ray paths without creating
 event files. TensorBoard writes happen inside veRL when training begins; the
-writer may buffer events briefly before they appear in the UI.
+writer may buffer events briefly before the exporter can read them.
 
-Start the dashboard in a second server terminal using the same Python:
+The launcher uses a CPU background thread to refresh PNG files every 600
+seconds and makes a final export attempt after the training subprocess exits
+(success, failure, or Ctrl+C). No web server, browser or open port is needed.
+The images are atomically replaced in place when new data is available. A
+plotting failure is logged without changing the training exit status. A hard
+kill or machine shutdown cannot guarantee a final export; run the offline
+command afterwards. Only flushed, readable records can be exported.
+
+Download or preview `plots/summary.png` and the individual metric PNG files.
+The curves show raw values without smoothing. Repeated optimizer steps are
+preserved (e.g. multiple skipped-update events at the same step); NaN/Inf are
+shown as gaps and counted, not converted to zero. Missing metrics are labelled
+"Not recorded" in the overview. Entropy computation remains disabled.
+
+Use `--plot-interval 600` before the Hydra `--` separator to select the default
+interval explicitly, or `--plot-interval 0` to disable automatic export. Each
+run is plotted separately and retains its original checkpoint step numbers.
+
+Export any existing run immediately, without restarting training:
 
 ```bash
-python -m tensorboard.main --logdir outputs/models --host 127.0.0.1 --port 6006
+python scripts/export_grpo_plots.py --run-dir outputs/models/grpo
 ```
 
-This discovers event files beneath all run directories. Alternatively point
-`--logdir` at one run's `tensorboard/` directory. Forward port 6006 through the
-server platform or SSH, then open `http://127.0.0.1:6006` in your local browser.
-For SSH, run `ssh -N -L 6006:127.0.0.1:6006 <server-alias>` locally, adding the
-appropriate SSH port option if needed. TensorFlow is not required for scalar
-logging via PyTorch's SummaryWriter. See the
-[PyTorch TensorBoard guide](https://docs.pytorch.org/docs/stable/tensorboard.html).
+The default output is `<run-dir>/plots`; `--output` can select another directory.
+Use the actual resumed run directory when applicable. The default `--source auto`
+reads both TensorBoard scalars and `training_diagnostics.jsonl` when available.
+At each tag/step the complete JSONL event sequence takes precedence, so buffered
+TensorBoard writes cannot hide the latest optimizer/skip records. TensorBoard
+adds uncovered points, including initial validation. The manifest records which
+sources were used. CSV wall times are blank for JSONL records, whose source has
+no timestamps. `--source diagnostics` explicitly plots older
+console-only runs without needing TensorBoard event files. This source includes
+optimizer-step and skipped-update metrics, but not the initial validation
+(which was logged only through veRL Tracking), nor raw candidate-generation
+metrics. Partial trailing JSONL records are read on a later refresh after the
+writer finishes the line. TensorFlow is not required.
+
+For a run that is already training, use a separate terminal to refresh static
+images without restarting the training process:
+
+```bash
+python scripts/export_grpo_plots.py --run-dir outputs/models/grpo --watch 600
+```
+
+Ctrl+C stops this standalone exporter and leaves training running. Do not run a
+second exporter targeting the same `plots/` directory when the launcher's
+automatic exporter is already active. Set `--output` to another directory if
+you need a separate export with a different source.
 
 These settings apply on the next launch, including checkpoint resume. An
-already running console-only process does not gain TensorBoard logging merely
-by updating the checkout. Resumed runs write to their new output directory and
-retain checkpoint step numbers. Existing JSONL diagnostics are preserved but
+already running process does not gain the launcher's automatic exporter merely
+by updating the checkout; use the standalone `--watch 600` command above.
+Existing JSONL diagnostics are preserved and can be exported to PNG/CSV but
 are not automatically converted into historical TensorBoard events.
 
 Dynamic sampling consumes a variable number of input batches per optimizer

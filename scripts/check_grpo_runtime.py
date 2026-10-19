@@ -220,6 +220,19 @@ def validate_tensorboard_tracking(config):
     }, sort_keys=True))
 
 
+def validate_static_plots():
+    if float(os.environ.get("SHOPPING_GRPO_PLOT_INTERVAL", "0")) <= 0:
+        return
+    from shopping_grpo.training.grpo.plots import check_plot_dependencies
+
+    try:
+        check_plot_dependencies()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    print("GRPO static plots preflight passed: PNG export every "
+          + os.environ["SHOPPING_GRPO_PLOT_INTERVAL"] + " seconds; no web server")
+
+
 def validate_trainer_backend(config):
     # Newer 0.9 forks may default to V1, which bypasses RayPPOTrainer and its
     # Shopping sampling/TRACE hooks. A matching version/hash cannot prove V1.
@@ -714,6 +727,7 @@ def main():
     validate_ray_init(config)
     installed = validate_installed_dependencies(config)
     validate_tensorboard_tracking(config)
+    validate_static_plots()
     validate_trainer_backend(config)
     validate_device(config, torch)
     validate_environment_contract()

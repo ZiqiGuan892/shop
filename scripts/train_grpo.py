@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -19,6 +20,8 @@ DEFAULT_MANIFEST = ROOT / "data/environment.json"
 DEFAULT_MODEL = ROOT / "outputs/models/sft-full"
 DEFAULT_TRAIN_DATA = ROOT / "data/grpo/train.parquet"
 DEFAULT_VAL_DATA = ROOT / "data/grpo/validation.parquet"
+sys.path.insert(0, str(ROOT / "src"))
+from shopping_grpo.training.grpo.plots import StaticPlotMonitor
 
 
 def _quote_hydra_string(value: str) -> str:
@@ -60,6 +63,10 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="metric backend alongside console (default: local TensorBoard)",
     )
     parser.add_argument("--experiment-name", default="shopping-agent-grpo")
+    parser.add_argument(
+        "--plot-interval", type=float, default=600, metavar="SECONDS",
+        help="refresh static PNG curves every SECONDS (default: 600; 0 disables)",
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="print command; no runtime checks or training")
@@ -118,6 +125,8 @@ def _validated_path(path: Path, description: str) -> Path:
 
 
 def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
+    if not math.isfinite(args.plot_interval) or args.plot_interval < 0:
+        raise SystemExit("--plot-interval must be finite and nonnegative")
     model = _validated_path(args.model, "model directory")
     if not model.is_dir() or not (model / "config.json").is_file():
         raise SystemExit(f"model directory is missing config.json: {model}")
@@ -169,6 +178,7 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
             "GRPO_TRAIN_FILE": str(train_data),
             "GRPO_VAL_FILE": str(val_data),
             "GRPO_OUTPUT_DIR": str(output),
+            "SHOPPING_GRPO_PLOT_INTERVAL": str(args.plot_interval),
             # Isolate event files by run, including a resumed run. Forward the
             # literal value to Ray because vendor ray_init may not resolve OmegaConf.
             "TENSORBOARD_DIR": str(output / "tensorboard"),
@@ -234,6 +244,11 @@ def main() -> None:
         "output": environment["GRPO_OUTPUT_DIR"],
         "logger": args.logger,
         "tensorboard_log_dir": environment["TENSORBOARD_DIR"],
+        "static_plots": {
+            "directory": str(Path(environment["GRPO_OUTPUT_DIR"]) / "plots"),
+            "interval_seconds": args.plot_interval,
+            "enabled": args.plot_interval > 0,
+        },
         "config": str(args.config.resolve()),
         "python": sys.executable,
         "verl_root": environment.get("VERL_ROOT", "not set; resolving verl from current Python import path"),
@@ -256,7 +271,26 @@ def main() -> None:
     with (output / "train.log").open("w", encoding="utf-8") as log:
         log.write(json.dumps(audit, ensure_ascii=False, indent=2) + "\n")
         log.flush()
-        raise SystemExit(run_logged(command, environment, log))
+        monitor = StaticPlotMonitor(output, args.plot_interval) if args.plot_interval else None
+        if monitor:
+            try:
+                monitor.start()
+            except Exception as exc:
+                message = f"Static plot monitor could not start (training continues): {exc}"
+                print(message, flush=True)
+                log.write(message + "\n")
+                monitor = None
+        try:
+            status = run_logged(command, environment, log)
+        finally:
+            if monitor:
+                try:
+                    monitor.stop()
+                except Exception as exc:
+                    message = f"Static plot monitor could not finish (training status preserved): {exc}"
+                    print(message, flush=True)
+                    log.write(message + "\n")
+        raise SystemExit(status)
 
 
 if __name__ == "__main__":

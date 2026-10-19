@@ -36,6 +36,9 @@ class GRPOLauncherTest(unittest.TestCase):
         self.env = patch.dict(os.environ, {"PYTHONPATH": "/existing/vendor/imports", "RAY_ADDRESS": "auto"})
         self.env.start()
         self.addCleanup(self.env.stop)
+        self.monitor_patch = patch.object(train_grpo, "StaticPlotMonitor")
+        self.monitor = self.monitor_patch.start()
+        self.addCleanup(self.monitor_patch.stop)
         for name in ("VERL_ROOT", "GRPO_MODEL_PATH"):
             if name in os.environ:
                 saved = os.environ.pop(name)
@@ -261,6 +264,7 @@ class GRPOLauncherTest(unittest.TestCase):
         check.assert_not_called()
         train.assert_not_called()
         self.assertFalse(self.output.exists())
+        self.monitor.assert_not_called()
 
     def test_check_only_preserves_exit_status_and_does_not_reserve_output(self):
         with patch.object(train_grpo.subprocess, "call", return_value=0) as check, patch.object(train_grpo, "run_logged") as train:
@@ -271,6 +275,7 @@ class GRPOLauncherTest(unittest.TestCase):
         self.assertIn("check_grpo_runtime.py", check.call_args.args[0][1])
         train.assert_not_called()
         self.assertFalse(self.output.exists())
+        self.monitor.assert_not_called()
 
     def test_preflight_failure_can_be_retried_without_deleting_output(self):
         with patch.object(train_grpo.subprocess, "call", return_value=5), patch.object(train_grpo, "run_logged") as train:
@@ -311,6 +316,43 @@ class GRPOLauncherTest(unittest.TestCase):
         self.assertEqual(audit["logger"], "tensorboard")
         self.assertEqual(audit["tensorboard_log_dir"], train_environment["TENSORBOARD_DIR"])
         self.assertIn("trainer.total_training_steps=20", (self.output / "train.log").read_text(encoding="utf-8"))
+        self.assertEqual(audit["static_plots"]["interval_seconds"], 600)
+        self.assertEqual(train_environment["SHOPPING_GRPO_PLOT_INTERVAL"], "600")
+        self.monitor.assert_called_once_with(self.output, 600)
+        self.monitor.return_value.start.assert_called_once()
+        self.monitor.return_value.stop.assert_called_once()
+
+    def test_plot_monitor_stops_when_training_is_interrupted(self):
+        with patch.object(train_grpo.subprocess, "call", return_value=0), \
+                patch.object(train_grpo, "run_logged", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.main(self.args())
+        self.monitor.return_value.stop.assert_called_once()
+
+    def test_static_plots_can_be_disabled_without_changing_training_logger(self):
+        with patch.object(train_grpo.subprocess, "call", return_value=0), \
+                patch.object(train_grpo, "run_logged", return_value=0):
+            with self.assertRaises(SystemExit) as exc:
+                self.main(self.args("--plot-interval", "0"))
+        self.assertEqual(exc.exception.code, 0)
+        self.monitor.assert_not_called()
+        audit = json.loads((self.output / "launch.json").read_text(encoding="utf-8"))
+        self.assertFalse(audit["static_plots"]["enabled"])
+        self.assertEqual(audit["logger"], "tensorboard")
+
+    def test_static_plot_interval_rejects_negative_and_nonfinite_values(self):
+        for value in ("-1", "nan", "inf"):
+            with self.subTest(value=value), self.assertRaisesRegex(SystemExit, "finite and nonnegative"):
+                train_grpo.build_command(self.args("--plot-interval", value))
+
+    def test_monitor_failure_does_not_replace_training_exit_status(self):
+        self.monitor.return_value.stop.side_effect = RuntimeError("export failed")
+        with patch.object(train_grpo.subprocess, "call", return_value=0), \
+                patch.object(train_grpo, "run_logged", return_value=7):
+            with self.assertRaises(SystemExit) as exc:
+                self.main(self.args())
+        self.assertEqual(exc.exception.code, 7)
+        self.assertIn("training status preserved", (self.output / "train.log").read_text())
 
     def test_existing_training_output_is_not_overwritten(self):
         self.output.mkdir()
