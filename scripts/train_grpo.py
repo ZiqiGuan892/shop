@@ -55,8 +55,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("outputs/models/grpo"))
     parser.add_argument(
         "--logger",
-        choices=("console", "swanlab"),
-        default="console",
+        choices=("tensorboard", "console", "swanlab"),
+        default="tensorboard",
+        help="metric backend alongside console (default: local TensorBoard)",
     )
     parser.add_argument("--experiment-name", default="shopping-agent-grpo")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -72,7 +73,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def hydra_overrides(args: argparse.Namespace, environment=None) -> list[str]:
-    logger = "[console,swanlab]" if args.logger == "swanlab" else "[console]"
+    logger = "[console]" if args.logger == "console" else f"[console,{args.logger}]"
     extra = list(args.hydra_overrides)
     if extra[:1] == ["--"]:
         extra = extra[1:]
@@ -83,6 +84,7 @@ def hydra_overrides(args: argparse.Namespace, environment=None) -> list[str]:
         "trainer.default_local_dir": "--output",
     }
     worker_pythonpath = "ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH"
+    worker_tensorboard = "ray_kwargs.ray_init.runtime_env.env_vars.TENSORBOARD_DIR"
     for item in extra:
         if item.startswith("--"):
             raise SystemExit("only Hydra key=value overrides are accepted after --")
@@ -92,6 +94,8 @@ def hydra_overrides(args: argparse.Namespace, environment=None) -> list[str]:
                 "set worker PYTHONPATH using shell PYTHONPATH or VERL_ROOT; "
                 "the launcher forwards the same concrete import path to preflight and Ray workers"
             )
+        if key == worker_tensorboard:
+            raise SystemExit("TENSORBOARD_DIR is managed by --output; do not override its Ray environment value")
         for field, option in paths.items():
             if key == field or field.startswith(key + "."):
                 raise SystemExit(f"set {field} using {option}, so preflight and training use the same path")
@@ -101,6 +105,8 @@ def hydra_overrides(args: argparse.Namespace, environment=None) -> list[str]:
         # Quote the actual path as one Hydra string, passed via argv (not a shell).
         value = _quote_hydra_string(environment["PYTHONPATH"])
         overrides.append(f"++{worker_pythonpath}={value}")
+        tensorboard_dir = _quote_hydra_string(environment["TENSORBOARD_DIR"])
+        overrides.append(f"++{worker_tensorboard}={tensorboard_dir}")
     return [*overrides, *extra]
 
 
@@ -163,6 +169,9 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
             "GRPO_TRAIN_FILE": str(train_data),
             "GRPO_VAL_FILE": str(val_data),
             "GRPO_OUTPUT_DIR": str(output),
+            # Isolate event files by run, including a resumed run. Forward the
+            # literal value to Ray because vendor ray_init may not resolve OmegaConf.
+            "TENSORBOARD_DIR": str(output / "tensorboard"),
             "SHOPPING_GRPO_DIAGNOSTICS_PATH": str(
                 output / "training_diagnostics.jsonl"
             ),
@@ -224,6 +233,7 @@ def main() -> None:
         "env_url": environment["SHOPSIM_BASE_URL"],
         "output": environment["GRPO_OUTPUT_DIR"],
         "logger": args.logger,
+        "tensorboard_log_dir": environment["TENSORBOARD_DIR"],
         "config": str(args.config.resolve()),
         "python": sys.executable,
         "verl_root": environment.get("VERL_ROOT", "not set; resolving verl from current Python import path"),

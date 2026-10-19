@@ -31,6 +31,7 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
                 "GRPO_VAL_FILE": str(ROOT / "data/grpo/validation.parquet"),
                 "GRPO_MODEL_PATH": str(ROOT / "outputs/models/sft-full"),
                 "GRPO_OUTPUT_DIR": str(ROOT / "outputs/grpo"),
+                "TENSORBOARD_DIR": str(ROOT / "outputs/grpo/tensorboard"),
                 "SHOPPING_GRPO_ROOT": str(ROOT),
                 "PYTHONPATH": str(ROOT / "src"),
             },
@@ -59,6 +60,7 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
             "pyarrow": "21.0.0",
             "torch-npu": "2.9.0",
             "vllm-ascend": "0.18.0+local",
+            "tensorboard": "2.18.0",
         }
         self.verl = types.SimpleNamespace(
             __file__=str(ROOT / "fake-vendor/verl/__init__.py"),
@@ -86,11 +88,13 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
         )
 
     def test_server_versions_and_console_logging_do_not_require_reinstallation(self):
+        self.config.trainer.logger = ["console"]
         installed = self.dependencies()
         self.assertEqual(installed["torch"], "2.9.0")
         self.assertEqual(installed["vllm"], "0.18.0+empty")
         self.assertEqual(installed["verl"], "0.9.0.dev+ascend.local")
         self.assertNotIn("swanlab", installed)
+        self.assertNotIn("tensorboard", installed)
         self.assertIn("torch-npu", installed)
         self.assertIn("vllm-ascend", installed)
 
@@ -107,6 +111,116 @@ class GRPORuntimeEnvironmentTest(unittest.TestCase):
             self.dependencies()
         self.versions["swanlab"] = "0.7.0"
         self.assertEqual(self.dependencies()["swanlab"], "0.7.0")
+
+    def test_tensorboard_dependency_is_required_only_when_selected(self):
+        self.assertEqual(list(self.config.trainer.logger), ["console", "tensorboard"])
+        self.assertEqual(self.dependencies()["tensorboard"], "2.18.0")
+        del self.versions["tensorboard"]
+        with self.assertRaisesRegex(SystemExit, "missing GRPO dependency.*tensorboard") as error:
+            self.dependencies()
+        self.assertIn(runtime.sys.executable, str(error.exception))
+        self.assertIn('-m pip install "tensorboard>=2.18,<3"', str(error.exception))
+        self.config.trainer.logger = ["console"]
+        self.assertNotIn("tensorboard", self.dependencies())
+        self.config.trainer.logger = ["console", "swanlab"]
+        self.versions["swanlab"] = "0.7.0"
+        self.assertNotIn("tensorboard", self.dependencies())
+
+    def tensorboard_config(self):
+        config = self.ray_config()
+        config.trainer.logger = ["console", "tensorboard"]
+        config.ray_kwargs.ray_init.runtime_env.env_vars.TENSORBOARD_DIR = os.environ["TENSORBOARD_DIR"]
+        return config
+
+    @staticmethod
+    def tensorboard_imports(writer=None, supported=None):
+        return {
+            "verl.utils.tracking": types.SimpleNamespace(
+                Tracking=types.SimpleNamespace(
+                    supported_backend=["console", "tensorboard"] if supported is None else supported,
+                ),
+            ),
+            "torch.utils.tensorboard": types.SimpleNamespace(SummaryWriter=writer),
+        }
+
+    def test_tensorboard_checks_backend_and_paths_without_constructing_writer(self):
+        config = self.tensorboard_config()
+        writer = mock.Mock(side_effect=AssertionError("preflight must not instantiate SummaryWriter"))
+        modules = self.tensorboard_imports(writer=writer)
+        with mock.patch.object(runtime.importlib, "import_module", side_effect=modules.__getitem__) as importer, \
+                mock.patch.object(runtime.Path, "mkdir") as mkdir:
+            runtime.validate_tensorboard_tracking(config)
+        self.assertEqual(importer.call_args_list, [
+            mock.call("verl.utils.tracking"), mock.call("torch.utils.tensorboard"),
+        ])
+        writer.assert_not_called()
+        mkdir.assert_not_called()
+        self.assertIn("GRPO TensorBoard preflight passed", self.stdout.getvalue())
+        self.assertIn('"ray_log_dir_verified": true', self.stdout.getvalue())
+
+    def test_console_and_swanlab_skip_tensorboard_imports_and_path_checks(self):
+        with mock.patch.dict(os.environ, {"TENSORBOARD_DIR": "", "GRPO_OUTPUT_DIR": ""}), \
+                mock.patch.object(runtime.importlib, "import_module") as importer:
+            for loggers in (["console"], ["console", "swanlab"]):
+                with self.subTest(loggers=loggers):
+                    self.config.trainer.logger = loggers
+                    runtime.validate_tensorboard_tracking(self.config)
+        importer.assert_not_called()
+
+    def test_tensorboard_rejects_missing_or_drifted_launcher_and_ray_paths(self):
+        for location in ("launcher", "ray"):
+            for value in (None, "", "tensorboard", str(ROOT / "outputs/elsewhere"), "${oc.env:TENSORBOARD_DIR}"):
+                with self.subTest(location=location, value=value):
+                    config = self.tensorboard_config()
+                    with mock.patch.dict(os.environ), \
+                            mock.patch.object(runtime.importlib, "import_module") as importer:
+                        if location == "launcher":
+                            if value is None:
+                                os.environ.pop("TENSORBOARD_DIR")
+                            else:
+                                os.environ["TENSORBOARD_DIR"] = value
+                        else:
+                            env_vars = config.ray_kwargs.ray_init.runtime_env.env_vars
+                            if value is None:
+                                del env_vars.TENSORBOARD_DIR
+                            else:
+                                env_vars.TENSORBOARD_DIR = value
+                        with self.assertRaisesRegex(SystemExit, "literal absolute GRPO_OUTPUT_DIR/tensorboard"):
+                            runtime.validate_tensorboard_tracking(config)
+                    importer.assert_not_called()
+
+    def test_tensorboard_requires_launcher_output_path(self):
+        config = self.tensorboard_config()
+        with mock.patch.dict(os.environ, {"GRPO_OUTPUT_DIR": ""}), \
+                mock.patch.object(runtime.importlib, "import_module") as importer:
+            with self.assertRaisesRegex(SystemExit, "TensorBoard requires GRPO_OUTPUT_DIR"):
+                runtime.validate_tensorboard_tracking(config)
+        importer.assert_not_called()
+
+    def test_tensorboard_rejects_unavailable_vendor_backend(self):
+        config = self.tensorboard_config()
+        for tracking in (
+            types.SimpleNamespace(),
+            types.SimpleNamespace(Tracking=types.SimpleNamespace(supported_backend=["console"])),
+        ):
+            with self.subTest(tracking=tracking), \
+                    mock.patch.object(runtime.importlib, "import_module", return_value=tracking) as importer:
+                with self.assertRaisesRegex(SystemExit, "veRL TensorBoard tracking backend is unavailable"):
+                    runtime.validate_tensorboard_tracking(config)
+            importer.assert_called_once_with("verl.utils.tracking")
+        with mock.patch.object(runtime.importlib, "import_module", side_effect=ImportError("tracking missing")):
+            with self.assertRaisesRegex(SystemExit, "veRL TensorBoard tracking backend is unavailable"):
+                runtime.validate_tensorboard_tracking(config)
+
+    def test_tensorboard_rejects_missing_or_noncallable_torch_writer(self):
+        config = self.tensorboard_config()
+        tracking = self.tensorboard_imports()["verl.utils.tracking"]
+        for result in (ImportError("tensorboard missing"), types.SimpleNamespace(), types.SimpleNamespace(SummaryWriter=None)):
+            with self.subTest(result=result), \
+                    mock.patch.object(runtime.importlib, "import_module", side_effect=[tracking, result]):
+                with self.assertRaisesRegex(SystemExit, "PyTorch TensorBoard writer is unavailable") as error:
+                    runtime.validate_tensorboard_tracking(config)
+                self.assertIn('-m pip install "tensorboard>=2.18,<3"', str(error.exception))
 
     def test_wrong_verl_public_version_is_rejected(self):
         self.verl.__version__ = "0.7.0+ascend"

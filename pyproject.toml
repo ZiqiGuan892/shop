@@ -39,6 +39,7 @@ grpo = [
   "tensordict==0.10.0",
   "numpy==2.2.6",
   "swanlab==0.9.1",
+  "tensorboard>=2.18,<3",
 ]
 dev = [
   "build>=1.2,<2",

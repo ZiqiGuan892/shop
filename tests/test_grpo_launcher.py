@@ -73,6 +73,50 @@ class GRPOLauncherTest(unittest.TestCase):
         self.assertEqual(env["GRPO_MODEL_PATH"], str(self.model.resolve()))
         self.assertFalse(self.output.exists())
 
+    def test_tensorboard_is_default_and_console_remains_an_explicit_option(self):
+        self.assertEqual(train_grpo.parse_args([]).logger, "tensorboard")
+        for options, expected in (
+            ((), "[console,tensorboard]"),
+            (("--logger", "tensorboard"), "[console,tensorboard]"),
+            (("--logger", "console"), "[console]"),
+        ):
+            with self.subTest(options=options):
+                command, environment = train_grpo.build_command(self.args(*options))
+                config = self.compose_project_overrides(command[5:], environment)
+                self.assertIn(f"trainer.logger={expected}", command)
+                self.assertEqual(list(config.trainer.logger), expected.strip("[]").split(","))
+                self.assertFalse(self.output.exists())
+
+    def test_swanlab_keeps_its_explicit_credentials_and_log_directory(self):
+        with patch.dict(os.environ):
+            os.environ.pop("SWANLAB_API_KEY", None)
+            with self.assertRaisesRegex(SystemExit, "requires SWANLAB_API_KEY"):
+                train_grpo.build_command(self.args("--logger", "swanlab"))
+            os.environ["SWANLAB_API_KEY"] = "test-only-key"
+            command, environment = train_grpo.build_command(self.args("--logger", "swanlab"))
+        self.assertIn("trainer.logger=[console,swanlab]", command)
+        self.assertEqual(environment["SWANLAB_MODE"], "online")
+        self.assertEqual(environment["SWANLAB_LOG_DIR"], str(self.output.resolve() / "swanlab"))
+        self.assertFalse(self.output.exists())
+
+    def test_tensorboard_directory_is_run_scoped_and_forwarded_literally_to_ray(self):
+        for name in ("run", "run with spaces", "run,with=punctuation", 'run with "quotes", spaces'):
+            for logger in ("tensorboard", "console"):
+                with self.subTest(name=name, logger=logger), patch.dict(os.environ, {
+                    "TENSORBOARD_DIR": "/stale/previous-run/tensorboard",
+                }):
+                    args = self.args("--logger", logger)
+                    args.output = self.root / name
+                    parent_environment = dict(os.environ)
+                    command, environment = train_grpo.build_command(args)
+                    self.assertEqual(dict(os.environ), parent_environment)
+                    expected = str(args.output.resolve() / "tensorboard")
+                    self.assertEqual(environment["TENSORBOARD_DIR"], expected)
+                    config = self.compose_project_overrides(command[5:], environment)
+                    raw = OmegaConf.to_container(config.ray_kwargs.ray_init.runtime_env.env_vars, resolve=False)
+                    self.assertEqual(raw["TENSORBOARD_DIR"], expected)
+                    self.assertFalse(args.output.exists())
+
     def test_external_verl_checkout_is_selected_without_installation(self):
         checkout = self.root / "vendor verl"
         (checkout / "verl").mkdir(parents=True)
@@ -160,6 +204,15 @@ class GRPOLauncherTest(unittest.TestCase):
                 with self.subTest(override=override), self.assertRaisesRegex(SystemExit, "shell PYTHONPATH or VERL_ROOT"):
                     train_grpo.build_command(self.args("--", override))
 
+    def test_worker_tensorboard_directory_cannot_bypass_output_option(self):
+        field = "ray_kwargs.ray_init.runtime_env.env_vars.TENSORBOARD_DIR"
+        for prefix in ("", "+", "++", "~"):
+            override = prefix + field + '="/other/run"'
+            with self.subTest(override=override), self.assertRaisesRegex(
+                SystemExit, "TENSORBOARD_DIR is managed by --output",
+            ):
+                train_grpo.build_command(self.args("--", override))
+
     def test_other_worker_environment_overrides_still_compose(self):
         command, environment = train_grpo.build_command(self.args(
             "--", '++ray_kwargs.ray_init.runtime_env.env_vars.EXTRA_IMPORT_FLAG="enabled"',
@@ -168,6 +221,7 @@ class GRPOLauncherTest(unittest.TestCase):
         env_vars = OmegaConf.to_container(config.ray_kwargs.ray_init.runtime_env.env_vars, resolve=False)
         self.assertEqual(env_vars["EXTRA_IMPORT_FLAG"], "enabled")
         self.assertEqual(env_vars["PYTHONPATH"], environment["PYTHONPATH"])
+        self.assertEqual(env_vars["TENSORBOARD_DIR"], environment["TENSORBOARD_DIR"])
 
     def test_default_model_is_sft_result_and_explicit_override_wins(self):
         self.assertEqual(train_grpo.parse_args([]).model, ROOT / "outputs/models/sft-full")
@@ -245,9 +299,17 @@ class GRPOLauncherTest(unittest.TestCase):
             resolve=False,
         )
         self.assertEqual(raw["runtime_env"]["env_vars"]["PYTHONPATH"], train_environment["PYTHONPATH"])
+        self.assertEqual(
+            raw["runtime_env"]["env_vars"]["TENSORBOARD_DIR"],
+            train_environment["TENSORBOARD_DIR"],
+        )
+        self.assertEqual(train_environment["TENSORBOARD_DIR"], str(self.output.resolve() / "tensorboard"))
+        self.assertFalse((self.output / "tensorboard").exists())
         audit = json.loads((self.output / "launch.json").read_text(encoding="utf-8"))
         self.assertEqual(audit["python"], sys.executable)
         self.assertEqual(audit["model"], str(self.model.resolve()))
+        self.assertEqual(audit["logger"], "tensorboard")
+        self.assertEqual(audit["tensorboard_log_dir"], train_environment["TENSORBOARD_DIR"])
         self.assertIn("trainer.total_training_steps=20", (self.output / "train.log").read_text(encoding="utf-8"))
 
     def test_existing_training_output_is_not_overwritten(self):

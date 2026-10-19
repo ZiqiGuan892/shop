@@ -61,6 +61,17 @@ still enforce the supported version and APIs. They do not require veRL pip
 metadata, and do not borrow version metadata from another installed checkout.
 Other required dependencies are still checked in the selected environment.
 
+TensorBoard is the default metrics backend alongside the console. If it is
+missing, install only the logging dependency in the active training environment:
+
+```bash
+"$PYTHON_BIN" -m pip install 'tensorboard>=2.18,<3'
+```
+
+Do not reinstall the full `grpo` extra over an already working vendor NPU stack
+to add logging. `--logger console` selects file/console logging without the
+TensorBoard dependency. `--logger swanlab` retains the existing online backend.
+
 Verify the path and imports before training:
 
 ```bash
@@ -371,6 +382,8 @@ For the default `--output outputs/models/grpo`, the launcher writes:
   streamed to both the console and file with unbuffered Python output.
 - `launch.json`: selected paths, interpreter and command.
 - `training_diagnostics.jsonl`: generated trajectories and optimizer metrics.
+- `tensorboard/events.out.tfevents.*`: scalar event files when using the
+  default `--logger tensorboard` (console output remains enabled).
 - veRL checkpoints and Hydra artifacts beneath the same run directory.
 - Each `global_step_N/` checkpoint also contains `data.pt` and
   `shopping_sampler_state.json` for dynamic-sampling resume, alongside the
@@ -386,13 +399,53 @@ Follow the console log with:
 tail -f outputs/models/grpo/train.log
 ```
 
-`generation_batch` diagnostic records contain every generated rollout, its
-public tool sequence, terminal result, reward breakdown, Guard rejection
-reasons and group keep/drop decision. `optimizer_step` records preserve scalar
-veRL metrics, including entropy, PPO KL, clip fractions, response lengths and
-effective-group rates. `skipped_update` records expose zero-signal attempts
+`generation_batch` diagnostic records contain every generated rollout's
+public tool sequence, terminal metadata, reward breakdown, Guard rejection
+reasons and group keep/drop decision. They do not contain complete model reply
+and observation text. `optimizer_step` records preserve the scalar metrics
+returned by veRL, including policy loss, PPO KL, clip fractions, response
+lengths and effective-group rates. Entropy is absent with the default
+`actor.calculate_entropy=false`; enabling TensorBoard does not enable entropy
+computation. `skipped_update` records expose zero-signal attempts
 that do not advance the optimizer step. Data is written as those events occur;
 a preflight failure will not produce rollout records.
+
+TensorBoard receives metrics on each completed optimizer update and each
+skipped-update event, with validation metrics before training and every 50
+updates. Repeated skipped updates share the same optimizer step. Reward metrics
+on optimizer updates describe the filtered training batch, not all candidates
+or an independent evaluation set. Useful scalar tags include
+`reward/terminal_utility_mean`, `reward/strict_mean`,
+`reward/purchase_success_rate`, `actor/pg_loss` and
+`shopping_dynamic_sampling/skipped_updates_total`; other actor metric names
+depend on the selected veRL build.
+
+The launcher sets `TENSORBOARD_DIR` to the absolute `--output/tensorboard`
+directory and forwards the same literal path to Ray. It overrides a stale
+shell `TENSORBOARD_DIR` to keep runs separate. Preflight checks the selected
+veRL backend, PyTorch SummaryWriter import and driver/Ray paths without creating
+event files. TensorBoard writes happen inside veRL when training begins; the
+writer may buffer events briefly before they appear in the UI.
+
+Start the dashboard in a second server terminal using the same Python:
+
+```bash
+python -m tensorboard.main --logdir outputs/models --host 127.0.0.1 --port 6006
+```
+
+This discovers event files beneath all run directories. Alternatively point
+`--logdir` at one run's `tensorboard/` directory. Forward port 6006 through the
+server platform or SSH, then open `http://127.0.0.1:6006` in your local browser.
+For SSH, run `ssh -N -L 6006:127.0.0.1:6006 <server-alias>` locally, adding the
+appropriate SSH port option if needed. TensorFlow is not required for scalar
+logging via PyTorch's SummaryWriter. See the
+[PyTorch TensorBoard guide](https://docs.pytorch.org/docs/stable/tensorboard.html).
+
+These settings apply on the next launch, including checkpoint resume. An
+already running console-only process does not gain TensorBoard logging merely
+by updating the checkout. Resumed runs write to their new output directory and
+retain checkpoint step numbers. Existing JSONL diagnostics are preserved but
+are not automatically converted into historical TensorBoard events.
 
 Dynamic sampling consumes a variable number of input batches per optimizer
 update. Therefore, `global_step_N` cannot determine the actual data position.

@@ -140,6 +140,8 @@ def validate_installed_dependencies(config):
     packages = list(REQUIRED_PACKAGES)
     if "swanlab" in config.trainer.get("logger", []):
         packages.append("swanlab")
+    if "tensorboard" in config.trainer.get("logger", []):
+        packages.append("tensorboard")
     if config.trainer.device == "npu":
         packages.extend(("torch-npu", "vllm-ascend"))
     from shopping_grpo.training.grpo.verl_source import resolve_verl_source
@@ -156,8 +158,66 @@ def validate_installed_dependencies(config):
         try:
             installed[package] = version(package)
         except PackageNotFoundError as exc:
+            if package == "tensorboard":
+                raise SystemExit(
+                    f"missing GRPO dependency in {sys.executable}: tensorboard. "
+                    f'Install only the logging dependency with: "{sys.executable}" '
+                    '-m pip install "tensorboard>=2.18,<3"; '
+                    "keep the existing training environment."
+                ) from exc
             raise SystemExit(f"missing GRPO dependency in {sys.executable}: {package}") from exc
     return installed
+
+
+def validate_tensorboard_tracking(config):
+    """Check the native backend and its shared log path without creating a writer."""
+    logger_backends = list(config.trainer.get("logger", []))
+    if "tensorboard" not in logger_backends:
+        return
+    from omegaconf import OmegaConf
+
+    output_dir = os.environ.get("GRPO_OUTPUT_DIR")
+    if not output_dir:
+        raise SystemExit("TensorBoard requires GRPO_OUTPUT_DIR; launch with scripts/grpo.sh")
+    expected_log_dir = Path(output_dir).expanduser().resolve() / "tensorboard"
+    ray_env = OmegaConf.to_container(config.ray_kwargs.ray_init.runtime_env.env_vars, resolve=False)
+    for label, value in (
+        ("TENSORBOARD_DIR", os.environ.get("TENSORBOARD_DIR")),
+        ("Ray runtime_env.env_vars.TENSORBOARD_DIR", ray_env.get("TENSORBOARD_DIR")),
+    ):
+        if (
+            not isinstance(value, str)
+            or not value
+            or "${" in value
+            or not Path(value).is_absolute()
+            or Path(value).resolve() != expected_log_dir
+        ):
+            raise SystemExit(
+                f"{label} must be the literal absolute GRPO_OUTPUT_DIR/tensorboard path "
+                f"({expected_log_dir}); launch with scripts/grpo.sh and its --output option"
+            )
+    try:
+        tracking_module = importlib.import_module("verl.utils.tracking")
+        supported = tracking_module.Tracking.supported_backend
+        if "tensorboard" not in supported:
+            raise ValueError("tensorboard is not in Tracking.supported_backend")
+    except (ImportError, AttributeError, TypeError, ValueError) as exc:
+        raise SystemExit(f"selected veRL TensorBoard tracking backend is unavailable: {exc}") from exc
+    try:
+        tensorboard_module = importlib.import_module("torch.utils.tensorboard")
+        if not callable(tensorboard_module.SummaryWriter):
+            raise TypeError("SummaryWriter is not callable")
+    except (ImportError, AttributeError, TypeError) as exc:
+        raise SystemExit(
+            f"PyTorch TensorBoard writer is unavailable in {sys.executable}: {exc}. "
+            f'Install the logging dependency with: "{sys.executable}" '
+            '-m pip install "tensorboard>=2.18,<3"'
+        ) from exc
+    print("GRPO TensorBoard preflight passed: " + json.dumps({
+        "logger": logger_backends,
+        "log_dir": str(expected_log_dir),
+        "ray_log_dir_verified": True,
+    }, sort_keys=True))
 
 
 def validate_trainer_backend(config):
@@ -653,6 +713,7 @@ def main():
     validate_launch_paths(config)
     validate_ray_init(config)
     installed = validate_installed_dependencies(config)
+    validate_tensorboard_tracking(config)
     validate_trainer_backend(config)
     validate_device(config, torch)
     validate_environment_contract()
