@@ -275,14 +275,18 @@ SFT policy; they have not been validated by a training run on your server.
 | KL reward / KL loss | disabled / disabled |
 | Policy entropy measurement | disabled; entropy coefficient remains 0 |
 | Actor activation memory | gradient checkpointing; native activation offload disabled |
-| Dynamic sampling | enabled; at most 3 generation batches and 10 consecutive skipped updates |
+| Dynamic sampling | enabled; at most 10 generation batches and 10 consecutive skipped updates |
 
 The prompt batch is global: 8 devices do not multiply it by another factor of
 8. Dynamic sampling may generate additional trajectories to retain groups with
 useful reward differences. Validation uses one deterministic rollout per prompt.
-The original learning rate, loss settings, batch sizes and sampling budgets
-above remain unchanged. Model selection, device topology and execution settings
-are adjusted for the 9B NPU run.
+The learning rate, loss settings, batch sizes and rollouts per prompt remain
+unchanged. Each collection window may now use up to 10 generation batches
+(20 task groups / 80 trajectories with this recipe), stopping as soon as two
+valid reward-varying groups are retained. This increases the sampling budget
+and may take more time; it does not enlarge the batch used for an actor update.
+Model selection, device topology and execution settings are adjusted for the
+9B NPU run.
 
 Dynamic sampling needs fresh environment rollouts for each generation batch.
 Cached rollout replay must remain disabled: both `skip.rollout.enable` and
@@ -409,7 +413,14 @@ bash scripts/grpo.sh --output outputs/models/grpo-resumed -- \
 ```
 
 Replace `global_step_100` with the checkpoint you actually saved. Keep the
-training data and sampling configuration consistent with that run. The trainer
+model, training data, batch sizes and per-prompt rollout count consistent with
+that run. `shopping_dynamic_sampling.max_num_gen_batches` may be increased
+when resuming: this collection limit comes from the current configuration,
+while the checkpoint restores the saved data cursor and sampler counters.
+Checkpoints are saved after completed updates with no partially collected
+groups. Resume starts from the last complete saved checkpoint, which may be
+earlier than the last step printed in the log; verify the actual checkpoint
+directory before launching. The trainer
 rejects a missing `shopping_sampler_state.json`, missing `data.pt`, mismatched
 step/dataloader metadata or invalid cursor. Older checkpoints without the
 Shopping sampler state cannot be resumed under this integration by guessing a

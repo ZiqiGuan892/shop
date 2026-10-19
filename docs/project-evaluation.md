@@ -219,9 +219,9 @@ PPO 风格 clipping 限制每次更新的变化幅度，损失采用 `token-mean
 
 当同一任务的 4 条轨迹奖励相同，组内优势为零，无法产生有效的相对学习信号。动态采样会按 prompt 分组，以 `terminal_utility` 判断奖励差异；任一轨迹被标为 `sampling_invalid` 时会丢弃整组，再尝试补足可更新 batch。它不是只保留成功轨迹，也不只是按成功与否这个布尔值筛选。
 
-`max_num_gen_batches=3` 表示一次更新尝试最多生成 **总计 3 批**，即首次生成后最多追加 2 批，不是额外补采 3 批。凑不齐 2 个有效组时跳过更新，并清空本次未凑满的组；跳过不增加 optimizer/global step，连续 10 次跳过会报错停止本次训练，避免无界重采样。当前实现直接修改服务器提供的 veRL 0.9.0.dev `ray_trainer.py`，安装时备份原文件并校验源码 SHA；原 0.8 补丁及其 marker 检查已移除。有效组比例、重采样和跳过更新等诊断继续保留。
+`max_num_gen_batches=10` 表示一次更新尝试最多生成 **总计 10 批**，即首次生成后最多追加 9 批，不是额外补采 10 批。每批 2 个任务组、每组 4 条轨迹，因此一个采样窗口最多生成 20 组、80 条轨迹，凑齐 2 个有效组即可提前更新。凑不齐时跳过更新，并清空本次未凑满的组；跳过不增加 optimizer/global step，连续 10 次跳过会报错停止本次训练，避免无界重采样。增加补采上限不会扩大实际更新 batch，但会增加潜在采样成本。当前实现直接修改服务器提供的 veRL 0.9.0.dev `ray_trainer.py`，安装时备份原文件并校验源码 SHA；原 0.8 补丁及其 marker 检查已移除。有效组比例、重采样和跳过更新等诊断继续保留。
 
-动态采样依赖新生成的轨迹，因此 `skip.rollout.enable` 和 `actor_rollout_ref.rollout.skip.enable`（若所选配置中存在）必须关闭，不能在未推进 optimizer step 的补采阶段重放缓存。这不改变每题 4 条轨迹、最多 3 批补足预算或原有学习率等参数。
+动态采样依赖新生成的轨迹，因此 `skip.rollout.enable` 和 `actor_rollout_ref.rollout.skip.enable`（若所选配置中存在）必须关闭，不能在未推进 optimizer step 的补采阶段重放缓存。当前每题仍采样 4 条轨迹，采样窗口最多 10 批，学习率等更新参数保持不变。
 
 每个新 checkpoint 中的 `shopping_sampler_state.json` 记录真实 epoch、已消费 batch 游标和采样器状态，并与 `data.pt` 中的 dataloader 状态一起恢复。动态采样的消费批次数不等于 optimizer step；旧 checkpoint 缺少这些状态时，训练器明确报错，不能靠训练步数猜测游标。安装、检查、恢复原文件和训练断点续训命令见 [GRPO 指南](grpo.md)。此源码适配不等于已经完成服务器上的 NPU 训练验证。
 

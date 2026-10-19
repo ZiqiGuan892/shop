@@ -123,7 +123,7 @@ algorithm:
 shopping_dynamic_sampling:
   enable: true
   metric: seq_reward
-  max_num_gen_batches: 3
+  max_num_gen_batches: 10
   max_consecutive_skipped_updates: 10
   reward_tolerance: 1.0e-8
 
